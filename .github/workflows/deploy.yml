@@ -1,0 +1,27 @@
+name: 🚀 Deploy Bot to VPS
+
+# 触发条件：当代码推送到 main 分支时
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 远程连接 VPS 并执行部署命令
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USERNAME }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            # 进入您的项目目录
+            cd /root/Telegram-Media-AI-Bot
+            
+            # 拉取 GitHub 上的最新代码
+            git pull origin main
+            
+            # 让 Docker 重新构建并后台启动
+            docker compose up -d --build
