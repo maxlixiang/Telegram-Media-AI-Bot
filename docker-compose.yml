@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  tg_media_bot:
+    build: .
+    container_name: video_downloader_bot
+    restart: unless-stopped
+    
+    # 【核心魔法 1】：共享主机网络。让代码里的 127.0.0.1 准确指向您的 VPS，从而连上本地 API 服务器
+    network_mode: "host" 
+    
+    # 【核心魔法 2】：文件夹穿透映射。确保机器人和本地 API 服务器读写的是同一个绝对路径
+    volumes:
+      - /var/lib/telegram-bot-api:/var/lib/telegram-bot-api
+      
+    # 让 Docker 自动读取您的环境变量文件
+    env_file:
+      - .env
