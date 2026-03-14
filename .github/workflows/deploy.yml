@@ -16,6 +16,7 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USERNAME }}
           key: ${{ secrets.VPS_SSH_KEY }}
+          port: 3858  # 比如 2222
           script: |
             # 进入您的项目目录
             cd /root/Telegram-Media-AI-Bot
