@@ -74,9 +74,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         original_msg_id = status_msg.reply_to_message.message_id if status_msg.reply_to_message else status_msg.message_id
 
         if is_audio:
-            await context.bot.send_audio(chat_id=status_msg.chat_id, audio=final_file, reply_to_message_id=original_msg_id, read_timeout=300, write_timeout=300)
+            await context.bot.send_audio(chat_id=status_msg.chat_id, audio=f"file://{final_file}", reply_to_message_id=original_msg_id, read_timeout=300, write_timeout=300)
         else:
-            await context.bot.send_video(chat_id=status_msg.chat_id, video=final_file, supports_streaming=True, reply_to_message_id=original_msg_id, read_timeout=300, write_timeout=300)
+            await context.bot.send_video(chat_id=status_msg.chat_id, video=f"file://{final_file}", supports_streaming=True, reply_to_message_id=original_msg_id, read_timeout=300, write_timeout=300)
             
         if need_transcript:
             await status_msg.edit_text("🎵 正在唤醒 Whisper 引擎极速听写，请稍候... 🧠✨")
@@ -92,7 +92,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with open(txt_filepath, "w", encoding="utf-8") as f:
                 f.write(combined_content)
             
-            await context.bot.send_document(chat_id=status_msg.chat_id, document=txt_filepath, filename=clean_filename, caption="🎉 **排版完成！请查收附件。**", parse_mode="Markdown", reply_to_message_id=original_msg_id)
+            await context.bot.send_document(chat_id=status_msg.chat_id, document=f"file://{txt_filepath}", filename=clean_filename, caption="🎉 **排版完成！请查收附件。**", parse_mode="Markdown", reply_to_message_id=original_msg_id)
 
         await status_msg.delete()
 
