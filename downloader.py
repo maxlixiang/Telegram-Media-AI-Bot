@@ -30,6 +30,7 @@ def sync_download(url: str, filepath_base: str, status_msg, loop, context, is_au
             'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '64'}],
             'quiet': True, 'no_warnings': True,
             'progress_hooks': [lambda d: progress_hook(d, status_msg, loop, context)],
+            'cookiefile': '/app/cookies.txt',  # 【新增】挂载音频下载所需的 Cookie
         }
         final_file = filepath_base + '.mp3'
     else:
@@ -38,6 +39,7 @@ def sync_download(url: str, filepath_base: str, status_msg, loop, context, is_au
             'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 
             'quiet': True, 'no_warnings': True,
             'progress_hooks': [lambda d: progress_hook(d, status_msg, loop, context)],
+            'cookiefile': '/app/cookies.txt',  # 【新增】挂载视频下载所需的 Cookie
         }
         final_file = filepath_base + '.mp4'
         

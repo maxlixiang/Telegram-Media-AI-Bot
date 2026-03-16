@@ -5,6 +5,7 @@ __pycache__/
 
 # 忽略机密配置文件
 .env
+cookies.txt
 
 # 忽略下载的临时媒体文件和生成的文稿
 *.mp4

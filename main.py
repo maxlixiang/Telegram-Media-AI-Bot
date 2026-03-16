@@ -3,6 +3,7 @@ import uuid
 import asyncio
 import logging
 import time
+import re
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ApplicationBuilder, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
@@ -19,7 +20,9 @@ async def receive_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = update.message.text
-    url = next((word for word in text.split() if word.startswith(('http://', 'https://'))), None)
+    match = re.search(r'(https?://[a-zA-Z0-9\.\/\?\:@\-_=#]+)', text)
+    url = match.group(1) if match else None
+    
     if not url:
         return
 
