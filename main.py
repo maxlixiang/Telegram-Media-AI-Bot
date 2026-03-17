@@ -4,6 +4,7 @@ import asyncio
 import logging
 import time
 import re
+from urllib.parse import urlparse
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ApplicationBuilder, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
@@ -13,17 +14,39 @@ from ai_services import process_groq_transcription, format_text_with_llm
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
+URL_PATTERN = re.compile(r'https?://[^\s<>"\'\u3000，。！？；：、（）【】《》]+', re.IGNORECASE)
+URL_TRAILING_NOISE = '.,!?;:)]}>\'"，。！？；：、）】》'
+DOUYIN_HOSTS = {"douyin.com", "v.douyin.com", "iesdouyin.com"}
+
+
+def extract_target_url(text: str) -> str | None:
+    if not text:
+        return None
+
+    for match in URL_PATTERN.finditer(text):
+        candidate = match.group(0).rstrip(URL_TRAILING_NOISE)
+        parsed = urlparse(candidate)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            return candidate
+    return None
+
+
+def is_douyin_url(url: str) -> bool:
+    hostname = (urlparse(url).hostname or "").lower()
+    return hostname in DOUYIN_HOSTS
+
+
 async def receive_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     if user_id not in ALLOWED_USERS:
         await update.message.reply_text(f"🛑 无权限。您的 User ID 是：`{user_id}`")
         return
 
-    text = update.message.text
-    match = re.search(r'(https?://[a-zA-Z0-9\.\/\?\:@\-_=#]+)', text)
-    url = match.group(1) if match else None
-    
+    text = update.message.text or ""
+    url = extract_target_url(text)
+
     if not url:
+        await update.message.reply_text("未识别到有效链接，请发送标准链接或包含抖音链接的分享文本。", reply_to_message_id=update.message.message_id)
         return
 
     url_id = str(uuid.uuid4())[:8]

@@ -12,7 +12,7 @@ services:
     # 【核心魔法 2】：文件夹穿透映射
     volumes:
       - /var/lib/telegram-bot-api:/var/lib/telegram-bot-api
-      - ./cookies.txt:/app/cookies.txt  # 【新增】将 VPS 上的 cookies 映射到容器内的 /app 目录
+      - ./cookies.txt:/app/cookies.txt:ro
       
     # 让 Docker 自动读取环境变量文件
     env_file:

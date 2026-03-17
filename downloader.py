@@ -1,6 +1,11 @@
+import os
 import time
 import asyncio
+from urllib.parse import urlparse
 import yt_dlp
+
+COOKIE_FILE = '/app/cookies.txt'
+DOUYIN_HOSTS = {"douyin.com", "v.douyin.com", "iesdouyin.com"}
 
 def progress_hook(d, status_msg, loop, context):
     if d['status'] == 'downloading':
@@ -22,6 +27,11 @@ def progress_hook(d, status_msg, loop, context):
             asyncio.run_coroutine_threadsafe(status_msg.edit_text(progress_text), loop)
             context.user_data['last_update'] = current_time
 
+
+def is_douyin_url(url: str) -> bool:
+    hostname = (urlparse(url).hostname or "").lower()
+    return hostname in DOUYIN_HOSTS
+
 def sync_download(url: str, filepath_base: str, status_msg, loop, context, is_audio: bool) -> str:
     if is_audio:
         ydl_opts = {
@@ -30,7 +40,6 @@ def sync_download(url: str, filepath_base: str, status_msg, loop, context, is_au
             'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '64'}],
             'quiet': True, 'no_warnings': True,
             'progress_hooks': [lambda d: progress_hook(d, status_msg, loop, context)],
-            'cookiefile': '/app/cookies.txt',  # 【新增】挂载音频下载所需的 Cookie
         }
         final_file = filepath_base + '.mp3'
     else:
@@ -39,9 +48,15 @@ def sync_download(url: str, filepath_base: str, status_msg, loop, context, is_au
             'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 
             'quiet': True, 'no_warnings': True,
             'progress_hooks': [lambda d: progress_hook(d, status_msg, loop, context)],
-            'cookiefile': '/app/cookies.txt',  # 【新增】挂载视频下载所需的 Cookie
         }
         final_file = filepath_base + '.mp4'
+
+    if is_douyin_url(url):
+        if not os.path.exists(COOKIE_FILE):
+            raise FileNotFoundError("抖音下载缺少 cookies.txt，请将 cookies.txt 挂载到 /app/cookies.txt")
+        ydl_opts['cookiefile'] = COOKIE_FILE
+    elif os.path.exists(COOKIE_FILE):
+        ydl_opts['cookiefile'] = COOKIE_FILE
         
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
