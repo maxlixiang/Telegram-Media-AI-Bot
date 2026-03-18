@@ -1,13 +1,16 @@
 import os
-import shutil
-import tempfile
+import subprocess
 import time
 import asyncio
+import logging
 from urllib.parse import urlparse
 import yt_dlp
 
+from douyin_downloader import COOKIE_FILE, download_file, fetch_douyin_video_meta, load_douyin_cookie_header
+
 COOKIE_FILE = '/app/cookies.txt'
 DOUYIN_HOSTS = {"douyin.com", "v.douyin.com", "iesdouyin.com"}
+logger = logging.getLogger(__name__)
 
 def progress_hook(d, status_msg, loop, context):
     if d['status'] == 'downloading':
@@ -35,17 +38,59 @@ def is_douyin_url(url: str) -> bool:
     return hostname in DOUYIN_HOSTS
 
 
-def prepare_douyin_cookiefile() -> str:
-    if not os.path.exists(COOKIE_FILE):
-        raise FileNotFoundError("抖音下载缺少 cookies.txt，请将 cookies.txt 挂载到 /app/cookies.txt")
+def extract_audio_to_mp3(input_video_path: str, output_mp3_path: str) -> str:
+    process = subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            input_video_path,
+            "-vn",
+            "-acodec",
+            "libmp3lame",
+            "-b:a",
+            "64k",
+            output_mp3_path,
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if process.returncode != 0:
+        logger.error("FFmpeg 转换失败 stderr_preview=%s", process.stderr[:500])
+        raise RuntimeError("抖音音频提取失败")
+    return output_mp3_path
 
-    fd, temp_cookie_path = tempfile.mkstemp(prefix='douyin_cookies_', suffix='.txt')
-    os.close(fd)
-    shutil.copyfile(COOKIE_FILE, temp_cookie_path)
-    return temp_cookie_path
+
+def download_douyin_media(url: str, filepath_base: str, is_audio: bool) -> str:
+    cookie_header, cookie_names = load_douyin_cookie_header(COOKIE_FILE)
+    logger.info(
+        "抖音 Cookie 读取结果 raw_url=%s cookie_loaded=%s cookie_names=%s",
+        url,
+        bool(cookie_names),
+        cookie_names,
+    )
+
+    media_meta = fetch_douyin_video_meta(url, cookie_header)
+    mp4_path = filepath_base + ".mp4"
+    download_file(media_meta["video_url"], mp4_path, media_meta["headers"])
+
+    if not is_audio:
+        return mp4_path
+
+    mp3_path = filepath_base + ".mp3"
+    try:
+        extract_audio_to_mp3(mp4_path, mp3_path)
+    finally:
+        if os.path.exists(mp4_path):
+            os.remove(mp4_path)
+    return mp3_path
 
 def sync_download(url: str, filepath_base: str, status_msg, loop, context, is_audio: bool) -> str:
-    temp_cookie_path = None
+    if is_douyin_url(url):
+        return download_douyin_media(url, filepath_base, is_audio)
 
     if is_audio:
         ydl_opts = {
@@ -65,15 +110,7 @@ def sync_download(url: str, filepath_base: str, status_msg, loop, context, is_au
         }
         final_file = filepath_base + '.mp4'
 
-    if is_douyin_url(url):
-        temp_cookie_path = prepare_douyin_cookiefile()
-        ydl_opts['cookiefile'] = temp_cookie_path
-
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-    finally:
-        if temp_cookie_path and os.path.exists(temp_cookie_path):
-            os.remove(temp_cookie_path)
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
         
     return final_file

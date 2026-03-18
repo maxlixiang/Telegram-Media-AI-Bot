@@ -2,3 +2,4 @@ python-telegram-bot>=20.8
 yt-dlp>=2024.03.10
 openai>=1.14.0
 python-dotenv>=1.0.1
+requests>=2.31.0
