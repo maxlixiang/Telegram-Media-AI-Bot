@@ -16,6 +16,7 @@ COOKIE_FILE = "/app/cookies.txt"
 DOUYIN_COOKIE_SUFFIXES = (
     "douyin.com",
     ".douyin.com",
+    "www.douyin.com",
     "v.douyin.com",
     "www.douyin.com",
     "iesdouyin.com",

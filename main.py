@@ -17,7 +17,7 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 
 URL_PATTERN = re.compile(r'https?://[^\s<>"\'\u3000，。！？；：、（）【】《》]+', re.IGNORECASE)
 URL_TRAILING_NOISE = '.,!?;:)]}>\'"，。！？；：、）】》'
-DOUYIN_HOSTS = {"douyin.com", "v.douyin.com", "iesdouyin.com"}
+DOUYIN_HOSTS = {"douyin.com", "www.douyin.com", "v.douyin.com", "iesdouyin.com"}
 TELEGRAM_SEND_TIMEOUTS = {
     "connect_timeout": 120,
     "read_timeout": 600,

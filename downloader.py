@@ -11,7 +11,7 @@ from twitter_downloader import download_file as download_twitter_file
 from twitter_downloader import fetch_twitter_video_meta, is_twitter_url
 
 COOKIE_FILE = '/app/cookies.txt'
-DOUYIN_HOSTS = {"douyin.com", "v.douyin.com", "iesdouyin.com"}
+DOUYIN_HOSTS = {"douyin.com", "www.douyin.com", "v.douyin.com", "iesdouyin.com"}
 logger = logging.getLogger(__name__)
 
 def progress_hook(d, status_msg, loop, context):
