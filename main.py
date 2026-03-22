@@ -4,8 +4,10 @@ import asyncio
 import logging
 import time
 import re
+from pathlib import Path
 from urllib.parse import urlparse
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 from telegram.ext import ApplicationBuilder, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 from config import TOKEN, ALLOWED_USERS, SHARED_DIR
@@ -17,6 +19,12 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 URL_PATTERN = re.compile(r'https?://[^\s<>"\'\u3000，。！？；：、（）【】《》]+', re.IGNORECASE)
 URL_TRAILING_NOISE = '.,!?;:)]}>\'"，。！？；：、）】》'
 DOUYIN_HOSTS = {"douyin.com", "v.douyin.com", "iesdouyin.com"}
+TELEGRAM_SEND_TIMEOUTS = {
+    "connect_timeout": 120,
+    "read_timeout": 600,
+    "write_timeout": 600,
+    "pool_timeout": 120,
+}
 
 
 def extract_target_url(text: str) -> str | None:
@@ -34,6 +42,81 @@ def extract_target_url(text: str) -> str | None:
 def is_douyin_url(url: str) -> bool:
     hostname = (urlparse(url).hostname or "").lower()
     return hostname in DOUYIN_HOSTS
+
+
+def format_file_size(size_bytes: int) -> str:
+    return f"{size_bytes / (1024 * 1024):.2f} MB"
+
+
+def build_send_failure_message(error: Exception) -> str:
+    error_text = str(error)
+    if isinstance(error, TimedOut) or "ConnectTimeout" in error_text or "TimedOut" in error_text:
+        return "发送失败：Telegram 上传超时，请稍后重试"
+    if isinstance(error, BadRequest):
+        if "Request Entity Too Large" in error_text or "file is too big" in error_text.lower():
+            return "发送失败：文件过大，无法发送到 Telegram"
+        return f"发送失败：Telegram 返回异常 ({error_text})"
+    if isinstance(error, RetryAfter):
+        return f"发送失败：Telegram 限流，请稍后重试 ({error_text})"
+    if isinstance(error, NetworkError):
+        return f"发送失败：Telegram 网络异常 ({error_text})"
+    if isinstance(error, FileNotFoundError):
+        return "发送失败：文件不存在或路径错误"
+    return f"发送失败：未知 Telegram 异常 ({error.__class__.__name__})"
+
+
+async def send_media_file(context, status_msg, final_file: str, is_audio: bool, original_msg_id: int):
+    send_method_name = "send_audio" if is_audio else "send_video"
+    file_exists = os.path.exists(final_file)
+    file_size = os.path.getsize(final_file) if file_exists else -1
+    file_path = Path(final_file)
+
+    logging.info(
+        "Telegram 发送开始 file_path=%s file_exists=%s file_size_bytes=%s file_size_mb=%s send_method=%s retry_attempted=%s",
+        final_file,
+        file_exists,
+        file_size,
+        format_file_size(file_size) if file_size >= 0 else "N/A",
+        send_method_name,
+        False,
+    )
+
+    if not file_exists:
+        raise FileNotFoundError(final_file)
+
+    try:
+        if is_audio:
+            await context.bot.send_audio(
+                chat_id=status_msg.chat_id,
+                audio=file_path,
+                reply_to_message_id=original_msg_id,
+                **TELEGRAM_SEND_TIMEOUTS,
+            )
+        else:
+            await context.bot.send_video(
+                chat_id=status_msg.chat_id,
+                video=file_path,
+                supports_streaming=True,
+                reply_to_message_id=original_msg_id,
+                **TELEGRAM_SEND_TIMEOUTS,
+            )
+        logging.info(
+            "Telegram 发送成功 file_path=%s file_size_bytes=%s send_method=%s",
+            final_file,
+            file_size,
+            send_method_name,
+        )
+    except Exception as exc:
+        logging.error(
+            "Telegram 发送失败 file_path=%s file_size_bytes=%s send_method=%s exception_type=%s exception=%s retry_attempted=%s",
+            final_file,
+            file_size,
+            send_method_name,
+            exc.__class__.__name__,
+            exc,
+            False,
+        )
+        raise
 
 
 async def receive_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -96,10 +179,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_msg.edit_text(f"媒体获取完成！正在发送至 Telegram... 🚀")
         original_msg_id = status_msg.reply_to_message.message_id if status_msg.reply_to_message else status_msg.message_id
 
-        if is_audio:
-            await context.bot.send_audio(chat_id=status_msg.chat_id, audio=open(final_file, 'rb'), reply_to_message_id=original_msg_id, read_timeout=300, write_timeout=300)
-        else:
-            await context.bot.send_video(chat_id=status_msg.chat_id, video=open(final_file, 'rb'), supports_streaming=True, reply_to_message_id=original_msg_id, read_timeout=300, write_timeout=300)
+        try:
+            await send_media_file(context, status_msg, final_file, is_audio, original_msg_id)
+        except Exception as send_error:
+            await status_msg.edit_text(build_send_failure_message(send_error))
+            return
             
         if need_transcript:
             await status_msg.edit_text("🎵 正在唤醒 Whisper 引擎极速听写，请稍候... 🧠✨")
@@ -115,7 +199,45 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with open(txt_filepath, "w", encoding="utf-8") as f:
                 f.write(combined_content)
             
-            await context.bot.send_document(chat_id=status_msg.chat_id, document=open(txt_filepath, 'rb'), filename=clean_filename, caption="🎉 **排版完成！请查收附件。**", parse_mode="Markdown", reply_to_message_id=original_msg_id)
+            txt_file_exists = os.path.exists(txt_filepath)
+            txt_file_size = os.path.getsize(txt_filepath) if txt_file_exists else -1
+            logging.info(
+                "Telegram 文稿发送开始 file_path=%s file_exists=%s file_size_bytes=%s file_size_mb=%s send_method=%s retry_attempted=%s",
+                txt_filepath,
+                txt_file_exists,
+                txt_file_size,
+                format_file_size(txt_file_size) if txt_file_size >= 0 else "N/A",
+                "send_document",
+                False,
+            )
+            try:
+                await context.bot.send_document(
+                    chat_id=status_msg.chat_id,
+                    document=Path(txt_filepath),
+                    filename=clean_filename,
+                    caption="🎉 **排版完成！请查收附件。**",
+                    parse_mode="Markdown",
+                    reply_to_message_id=original_msg_id,
+                    **TELEGRAM_SEND_TIMEOUTS,
+                )
+                logging.info(
+                    "Telegram 文稿发送成功 file_path=%s file_size_bytes=%s send_method=%s",
+                    txt_filepath,
+                    txt_file_size,
+                    "send_document",
+                )
+            except Exception as doc_error:
+                logging.error(
+                    "Telegram 文稿发送失败 file_path=%s file_size_bytes=%s send_method=%s exception_type=%s exception=%s retry_attempted=%s",
+                    txt_filepath,
+                    txt_file_size,
+                    "send_document",
+                    doc_error.__class__.__name__,
+                    doc_error,
+                    False,
+                )
+                await status_msg.edit_text(build_send_failure_message(doc_error))
+                return
         await status_msg.delete()
 
     except Exception as e:
