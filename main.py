@@ -4,7 +4,6 @@ import asyncio
 import logging
 import time
 import re
-from pathlib import Path
 from urllib.parse import urlparse
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
@@ -69,8 +68,6 @@ async def send_media_file(context, status_msg, final_file: str, is_audio: bool, 
     send_method_name = "send_audio" if is_audio else "send_video"
     file_exists = os.path.exists(final_file)
     file_size = os.path.getsize(final_file) if file_exists else -1
-    file_path = Path(final_file)
-
     logging.info(
         "Telegram 发送开始 file_path=%s file_exists=%s file_size_bytes=%s file_size_mb=%s send_method=%s retry_attempted=%s",
         final_file,
@@ -85,21 +82,22 @@ async def send_media_file(context, status_msg, final_file: str, is_audio: bool, 
         raise FileNotFoundError(final_file)
 
     try:
-        if is_audio:
-            await context.bot.send_audio(
-                chat_id=status_msg.chat_id,
-                audio=file_path,
-                reply_to_message_id=original_msg_id,
-                **TELEGRAM_SEND_TIMEOUTS,
-            )
-        else:
-            await context.bot.send_video(
-                chat_id=status_msg.chat_id,
-                video=file_path,
-                supports_streaming=True,
-                reply_to_message_id=original_msg_id,
-                **TELEGRAM_SEND_TIMEOUTS,
-            )
+        with open(final_file, "rb") as media_file:
+            if is_audio:
+                await context.bot.send_audio(
+                    chat_id=status_msg.chat_id,
+                    audio=media_file,
+                    reply_to_message_id=original_msg_id,
+                    **TELEGRAM_SEND_TIMEOUTS,
+                )
+            else:
+                await context.bot.send_video(
+                    chat_id=status_msg.chat_id,
+                    video=media_file,
+                    supports_streaming=True,
+                    reply_to_message_id=original_msg_id,
+                    **TELEGRAM_SEND_TIMEOUTS,
+                )
         logging.info(
             "Telegram 发送成功 file_path=%s file_size_bytes=%s send_method=%s",
             final_file,
@@ -211,15 +209,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 False,
             )
             try:
-                await context.bot.send_document(
-                    chat_id=status_msg.chat_id,
-                    document=Path(txt_filepath),
-                    filename=clean_filename,
-                    caption="🎉 **排版完成！请查收附件。**",
-                    parse_mode="Markdown",
-                    reply_to_message_id=original_msg_id,
-                    **TELEGRAM_SEND_TIMEOUTS,
-                )
+                with open(txt_filepath, "rb") as document_file:
+                    await context.bot.send_document(
+                        chat_id=status_msg.chat_id,
+                        document=document_file,
+                        filename=clean_filename,
+                        caption="🎉 **排版完成！请查收附件。**",
+                        parse_mode="Markdown",
+                        reply_to_message_id=original_msg_id,
+                        **TELEGRAM_SEND_TIMEOUTS,
+                    )
                 logging.info(
                     "Telegram 文稿发送成功 file_path=%s file_size_bytes=%s send_method=%s",
                     txt_filepath,
