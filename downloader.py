@@ -7,6 +7,8 @@ from urllib.parse import urlparse
 import yt_dlp
 
 from douyin_downloader import COOKIE_FILE, download_file, fetch_douyin_video_meta, load_douyin_cookie_header
+from twitter_downloader import download_file as download_twitter_file
+from twitter_downloader import fetch_twitter_video_meta, is_twitter_url
 
 COOKIE_FILE = '/app/cookies.txt'
 DOUYIN_HOSTS = {"douyin.com", "v.douyin.com", "iesdouyin.com"}
@@ -60,7 +62,7 @@ def extract_audio_to_mp3(input_video_path: str, output_mp3_path: str) -> str:
     )
     if process.returncode != 0:
         logger.error("FFmpeg 转换失败 stderr_preview=%s", process.stderr[:500])
-        raise RuntimeError("抖音音频提取失败")
+        raise RuntimeError("媒体音频提取失败")
     return output_mp3_path
 
 
@@ -88,9 +90,28 @@ def download_douyin_media(url: str, filepath_base: str, is_audio: bool) -> str:
             os.remove(mp4_path)
     return mp3_path
 
+
+def download_twitter_media(url: str, filepath_base: str, is_audio: bool) -> str:
+    media_meta = fetch_twitter_video_meta(url)
+    mp4_path = filepath_base + ".mp4"
+    download_twitter_file(media_meta["video_url"], mp4_path, media_meta["headers"])
+
+    if not is_audio:
+        return mp4_path
+
+    mp3_path = filepath_base + ".mp3"
+    try:
+        extract_audio_to_mp3(mp4_path, mp3_path)
+    finally:
+        if os.path.exists(mp4_path):
+            os.remove(mp4_path)
+    return mp3_path
+
 def sync_download(url: str, filepath_base: str, status_msg, loop, context, is_audio: bool) -> str:
     if is_douyin_url(url):
         return download_douyin_media(url, filepath_base, is_audio)
+    if is_twitter_url(url):
+        return download_twitter_media(url, filepath_base, is_audio)
 
     if is_audio:
         ydl_opts = {
