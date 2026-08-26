@@ -26,6 +26,8 @@ GROQ_API_KEY=你的 Groq API Key
 MEDIA_MAX_AGE_HOURS=24
 # 每 60 分钟扫描一次残留文件
 CLEANUP_INTERVAL_MINUTES=60
+# 大文件上传最多等待 30 分钟
+TELEGRAM_UPLOAD_TIMEOUT_SECONDS=1800
 ```
 
 `cookies.txt` 是抖音下载使用的 Netscape cookies 文件。`docker-compose.yml` 会把它挂载到容器内：

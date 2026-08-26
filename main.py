@@ -9,7 +9,14 @@ from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 from telegram.ext import ApplicationBuilder, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
-from config import TOKEN, ALLOWED_USERS, SHARED_DIR, MEDIA_MAX_AGE_HOURS, CLEANUP_INTERVAL_MINUTES
+from config import (
+    TOKEN,
+    ALLOWED_USERS,
+    SHARED_DIR,
+    MEDIA_MAX_AGE_HOURS,
+    CLEANUP_INTERVAL_MINUTES,
+    TELEGRAM_UPLOAD_TIMEOUT_SECONDS,
+)
 from cleanup import cleanup_stale_media_files, cleanup_task_files
 from downloader import sync_download
 from ai_services import process_groq_transcription, format_text_with_llm
@@ -21,10 +28,27 @@ URL_TRAILING_NOISE = '.,!?;:)]}>\'"，。！？；：、）】》'
 DOUYIN_HOSTS = {"douyin.com", "www.douyin.com", "v.douyin.com", "iesdouyin.com"}
 TELEGRAM_SEND_TIMEOUTS = {
     "connect_timeout": 120,
-    "read_timeout": 600,
-    "write_timeout": 600,
+    "read_timeout": TELEGRAM_UPLOAD_TIMEOUT_SECONDS,
+    "write_timeout": TELEGRAM_UPLOAD_TIMEOUT_SECONDS,
     "pool_timeout": 120,
 }
+UPLOAD_STATUS_INTERVAL_SECONDS = 30
+UPLOAD_PROGRESS_FRAMES = (
+    "■■■□□□□□□□",
+    "□■■■□□□□□□",
+    "□□■■■□□□□□",
+    "□□□■■■□□□□",
+    "□□□□■■■□□□",
+    "□□□□□■■■□□",
+    "□□□□□□■■■□",
+    "□□□□□□□■■■",
+    "□□□□□□■■■□",
+    "□□□□□■■■□□",
+    "□□□□■■■□□□",
+    "□□□■■■□□□□",
+    "□□■■■□□□□□",
+    "□■■■□□□□□□",
+)
 
 
 async def cleanup_media_loop():
@@ -84,74 +108,190 @@ def format_file_size(size_bytes: int) -> str:
     return f"{size_bytes / (1024 * 1024):.2f} MB"
 
 
+def format_elapsed_time(elapsed_seconds: float) -> str:
+    total_seconds = max(0, int(elapsed_seconds))
+    minutes, seconds = divmod(total_seconds, 60)
+    if minutes:
+        return f"{minutes} 分 {seconds} 秒"
+    return f"{seconds} 秒"
+
+
+def classify_send_error(error: Exception) -> str:
+    error_text = str(error).lower()
+    if isinstance(error, TimedOut) or "connecttimeout" in error_text or "timedout" in error_text:
+        return "UPLOAD_TIMEOUT"
+    if isinstance(error, BadRequest):
+        if "request entity too large" in error_text or "file is too big" in error_text:
+            return "FILE_TOO_LARGE"
+        return "TELEGRAM_BAD_REQUEST"
+    if isinstance(error, RetryAfter):
+        return "TELEGRAM_RATE_LIMIT"
+    if isinstance(error, NetworkError):
+        return "TELEGRAM_NETWORK_ERROR"
+    if isinstance(error, FileNotFoundError):
+        return "LOCAL_FILE_NOT_FOUND"
+    return "UNKNOWN_SEND_ERROR"
+
+
 def build_send_failure_message(error: Exception) -> str:
     error_text = str(error)
+    diagnostic_code = classify_send_error(error)
     if isinstance(error, TimedOut) or "ConnectTimeout" in error_text or "TimedOut" in error_text:
-        return "发送失败：Telegram 上传超时，请稍后重试"
-    if isinstance(error, BadRequest):
+        message = "发送失败：Telegram 上传超时，请稍后重试"
+    elif isinstance(error, BadRequest):
         if "Request Entity Too Large" in error_text or "file is too big" in error_text.lower():
-            return "发送失败：文件过大，无法发送到 Telegram"
-        return f"发送失败：Telegram 返回异常 ({error_text})"
-    if isinstance(error, RetryAfter):
-        return f"发送失败：Telegram 限流，请稍后重试 ({error_text})"
-    if isinstance(error, NetworkError):
-        return f"发送失败：Telegram 网络异常 ({error_text})"
-    if isinstance(error, FileNotFoundError):
-        return "发送失败：文件不存在或路径错误"
-    return f"发送失败：未知 Telegram 异常 ({error.__class__.__name__})"
+            message = "发送失败：文件过大，无法发送到 Telegram"
+        else:
+            message = f"发送失败：Telegram 返回异常 ({error_text})"
+    elif isinstance(error, RetryAfter):
+        message = f"发送失败：Telegram 限流，请稍后重试 ({error_text})"
+    elif isinstance(error, NetworkError):
+        message = f"发送失败：Telegram 网络异常 ({error_text})"
+    elif isinstance(error, FileNotFoundError):
+        message = "发送失败：文件不存在或路径错误"
+    else:
+        message = f"发送失败：未知 Telegram 异常 ({error.__class__.__name__})"
+    return f"{message}\n诊断编号：{diagnostic_code}"
+
+
+def should_fallback_to_document(error: Exception) -> bool:
+    if not isinstance(error, BadRequest):
+        return False
+
+    error_text = str(error).lower()
+    excluded_errors = (
+        "file is too big",
+        "request entity too large",
+        "chat not found",
+        "bot was blocked",
+        "not enough rights",
+        "reply message not found",
+        "message thread not found",
+    )
+    if any(message in error_text for message in excluded_errors):
+        return False
+
+    video_errors = (
+        "failed to process",
+        "failed to get video",
+        "wrong file",
+        "video",
+        "mime",
+        "duration",
+    )
+    return any(message in error_text for message in video_errors)
+
+
+async def update_upload_status(status_msg, file_size: int):
+    started_at = time.monotonic()
+    frame_index = 0
+    while True:
+        await asyncio.sleep(UPLOAD_STATUS_INTERVAL_SECONDS)
+        elapsed_text = format_elapsed_time(time.monotonic() - started_at)
+        progress_frame = UPLOAD_PROGRESS_FRAMES[frame_index % len(UPLOAD_PROGRESS_FRAMES)]
+        frame_index += 1
+        try:
+            await status_msg.edit_text(
+                "文件已下载完成，正在上传至 Telegram... 🚀\n\n"
+                f"文件大小：{format_file_size(file_size)}\n"
+                f"上传状态：[{progress_frame}] 处理中\n"
+                f"已等待：{elapsed_text}\n\n"
+                "提示：Telegram 不提供真实上传百分比，此进度条表示任务仍在运行。"
+            )
+        except BadRequest as exc:
+            if "message is not modified" not in str(exc).lower():
+                logging.warning("上传状态更新失败 exception=%s", exc)
+        except NetworkError as exc:
+            logging.warning("上传状态更新遇到网络异常 exception=%s", exc)
+        except Exception as exc:
+            logging.warning("上传状态更新已停止 exception_type=%s exception=%s", exc.__class__.__name__, exc)
+            return
 
 
 async def send_media_file(context, status_msg, final_file: str, is_audio: bool, original_msg_id: int):
     send_method_name = "send_audio" if is_audio else "send_video"
+    retry_attempted = False
+    send_started_at = time.monotonic()
     file_exists = os.path.exists(final_file)
     file_size = os.path.getsize(final_file) if file_exists else -1
     logging.info(
-        "Telegram 发送开始 file_path=%s file_exists=%s file_size_bytes=%s file_size_mb=%s send_method=%s retry_attempted=%s",
+        "Telegram 发送开始 file_path=%s file_exists=%s file_size_bytes=%s file_size_mb=%s send_method=%s transport=%s retry_attempted=%s",
         final_file,
         file_exists,
         file_size,
         format_file_size(file_size) if file_size >= 0 else "N/A",
         send_method_name,
+        "local_path",
         False,
     )
 
     if not file_exists:
         raise FileNotFoundError(final_file)
 
+    upload_status_task = asyncio.create_task(
+        update_upload_status(status_msg, file_size),
+        name="telegram-upload-status",
+    )
     try:
-        with open(final_file, "rb") as media_file:
-            if is_audio:
-                await context.bot.send_audio(
-                    chat_id=status_msg.chat_id,
-                    audio=media_file,
-                    reply_to_message_id=original_msg_id,
-                    **TELEGRAM_SEND_TIMEOUTS,
-                )
-            else:
+        if is_audio:
+            await context.bot.send_audio(
+                chat_id=status_msg.chat_id,
+                audio=final_file,
+                reply_to_message_id=original_msg_id,
+                **TELEGRAM_SEND_TIMEOUTS,
+            )
+        else:
+            try:
                 await context.bot.send_video(
                     chat_id=status_msg.chat_id,
-                    video=media_file,
+                    video=final_file,
                     supports_streaming=True,
                     reply_to_message_id=original_msg_id,
                     **TELEGRAM_SEND_TIMEOUTS,
                 )
+            except Exception as video_error:
+                if not should_fallback_to_document(video_error):
+                    raise
+                logging.warning(
+                    "视频接口处理失败，回退为普通文件发送 file_path=%s exception=%s",
+                    final_file,
+                    video_error,
+                )
+                retry_attempted = True
+                send_method_name = "send_document_fallback"
+                await context.bot.send_document(
+                    chat_id=status_msg.chat_id,
+                    document=final_file,
+                    filename=os.path.basename(final_file),
+                    reply_to_message_id=original_msg_id,
+                    **TELEGRAM_SEND_TIMEOUTS,
+                )
         logging.info(
-            "Telegram 发送成功 file_path=%s file_size_bytes=%s send_method=%s",
+            "Telegram 发送成功 file_path=%s file_size_bytes=%s send_method=%s elapsed_seconds=%.2f",
             final_file,
             file_size,
             send_method_name,
+            time.monotonic() - send_started_at,
         )
     except Exception as exc:
         logging.error(
-            "Telegram 发送失败 file_path=%s file_size_bytes=%s send_method=%s exception_type=%s exception=%s retry_attempted=%s",
+            "Telegram 发送失败 file_path=%s file_size_bytes=%s send_method=%s elapsed_seconds=%.2f diagnostic_code=%s exception_type=%s exception=%s retry_attempted=%s",
             final_file,
             file_size,
             send_method_name,
+            time.monotonic() - send_started_at,
+            classify_send_error(exc),
             exc.__class__.__name__,
             exc,
-            False,
+            retry_attempted,
         )
         raise
+    finally:
+        upload_status_task.cancel()
+        try:
+            await upload_status_task
+        except asyncio.CancelledError:
+            pass
 
 
 async def receive_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -202,6 +342,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     filepath_base = os.path.join(SHARED_DIR, f"media_{uuid.uuid4().hex}")
     final_file = ""
     txt_filepath = "" 
+    retain_task_files = False
     context.user_data['last_update'] = 0
     loop = asyncio.get_event_loop()
 
@@ -211,13 +352,24 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status_msg.edit_text("下载失败❌")
             return
 
-        await status_msg.edit_text(f"媒体获取完成！正在发送至 Telegram... 🚀")
+        await status_msg.edit_text(
+            "媒体获取完成！正在发送至 Telegram... 🚀\n\n"
+            f"文件大小：{format_file_size(os.path.getsize(final_file))}\n"
+            "上传状态：[■■■□□□□□□□] 正在建立连接\n\n"
+            "提示：大文件上传期间，状态将每 30 秒更新一次。"
+        )
         original_msg_id = status_msg.reply_to_message.message_id if status_msg.reply_to_message else status_msg.message_id
 
+        upload_started_at = time.monotonic()
         try:
             await send_media_file(context, status_msg, final_file, is_audio, original_msg_id)
         except Exception as send_error:
-            await status_msg.edit_text(build_send_failure_message(send_error))
+            retain_task_files = True
+            await status_msg.edit_text(
+                f"{build_send_failure_message(send_error)}\n\n"
+                f"发送耗时：{format_elapsed_time(time.monotonic() - upload_started_at)}\n"
+                f"服务器文件将暂存最多 {MEDIA_MAX_AGE_HOURS} 小时，便于排查。"
+            )
             return
             
         if need_transcript:
@@ -263,6 +415,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "send_document",
                 )
             except Exception as doc_error:
+                retain_task_files = True
                 logging.error(
                     "Telegram 文稿发送失败 file_path=%s file_size_bytes=%s send_method=%s exception_type=%s exception=%s retry_attempted=%s",
                     txt_filepath,
@@ -280,13 +433,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_msg.edit_text(f"发生了一些意外错误😵")
         logging.error(f"全局错误: {e}")
     finally:
-        removed_count, removed_bytes = await asyncio.to_thread(cleanup_task_files, filepath_base)
-        logging.info(
-            "任务临时文件清理完成 prefix=%s removed_count=%s freed_mb=%.2f",
-            filepath_base,
-            removed_count,
-            removed_bytes / (1024 * 1024),
-        )
+        if retain_task_files:
+            logging.warning(
+                "发送失败，任务文件暂存等待定时清理 prefix=%s max_age_hours=%s",
+                filepath_base,
+                MEDIA_MAX_AGE_HOURS,
+            )
+        else:
+            removed_count, removed_bytes = await asyncio.to_thread(cleanup_task_files, filepath_base)
+            logging.info(
+                "任务临时文件清理完成 prefix=%s removed_count=%s freed_mb=%.2f",
+                filepath_base,
+                removed_count,
+                removed_bytes / (1024 * 1024),
+            )
 
 if __name__ == '__main__':
     app = (

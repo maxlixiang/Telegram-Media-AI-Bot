@@ -12,3 +12,4 @@ GROQ_BASE_URL = 'https://api.groq.com/openai/v1'
 SHARED_DIR = "/var/lib/telegram-bot-api"
 MEDIA_MAX_AGE_HOURS = max(1, int(os.getenv("MEDIA_MAX_AGE_HOURS", "24")))
 CLEANUP_INTERVAL_MINUTES = max(1, int(os.getenv("CLEANUP_INTERVAL_MINUTES", "60")))
+TELEGRAM_UPLOAD_TIMEOUT_SECONDS = max(600, int(os.getenv("TELEGRAM_UPLOAD_TIMEOUT_SECONDS", "1800")))
