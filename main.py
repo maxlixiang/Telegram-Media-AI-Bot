@@ -9,7 +9,8 @@ from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 from telegram.ext import ApplicationBuilder, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
-from config import TOKEN, ALLOWED_USERS, SHARED_DIR
+from config import TOKEN, ALLOWED_USERS, SHARED_DIR, MEDIA_MAX_AGE_HOURS, CLEANUP_INTERVAL_MINUTES
+from cleanup import cleanup_stale_media_files, cleanup_task_files
 from downloader import sync_download
 from ai_services import process_groq_transcription, format_text_with_llm
 
@@ -24,6 +25,42 @@ TELEGRAM_SEND_TIMEOUTS = {
     "write_timeout": 600,
     "pool_timeout": 120,
 }
+
+
+async def cleanup_media_loop():
+    max_age_seconds = MEDIA_MAX_AGE_HOURS * 60 * 60
+    while True:
+        removed_count, removed_bytes = await asyncio.to_thread(
+            cleanup_stale_media_files,
+            SHARED_DIR,
+            max_age_seconds,
+        )
+        if removed_count:
+            logging.info(
+                "自动清理临时媒体完成 removed_count=%s freed_mb=%.2f max_age_hours=%s",
+                removed_count,
+                removed_bytes / (1024 * 1024),
+                MEDIA_MAX_AGE_HOURS,
+            )
+        await asyncio.sleep(CLEANUP_INTERVAL_MINUTES * 60)
+
+
+async def post_init(application):
+    os.makedirs(SHARED_DIR, exist_ok=True)
+    application.bot_data["cleanup_task"] = asyncio.create_task(
+        cleanup_media_loop(),
+        name="media-cleanup-loop",
+    )
+
+
+async def post_shutdown(application):
+    cleanup_task = application.bot_data.get("cleanup_task")
+    if cleanup_task:
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
 
 
 def extract_target_url(text: str) -> str | None:
@@ -243,11 +280,24 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_msg.edit_text(f"发生了一些意外错误😵")
         logging.error(f"全局错误: {e}")
     finally:
-        if final_file and os.path.exists(final_file): os.remove(final_file)
-        if txt_filepath and os.path.exists(txt_filepath): os.remove(txt_filepath)
+        removed_count, removed_bytes = await asyncio.to_thread(cleanup_task_files, filepath_base)
+        logging.info(
+            "任务临时文件清理完成 prefix=%s removed_count=%s freed_mb=%.2f",
+            filepath_base,
+            removed_count,
+            removed_bytes / (1024 * 1024),
+        )
 
 if __name__ == '__main__':
-    app = ApplicationBuilder().token(TOKEN).base_url("http://127.0.0.1:8081/bot").local_mode(True).build()
+    app = (
+        ApplicationBuilder()
+        .token(TOKEN)
+        .base_url("http://127.0.0.1:8081/bot")
+        .local_mode(True)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), receive_link))
     app.add_handler(CallbackQueryHandler(button_callback))
     print("🤖 模块化双引擎机器人已启动...")

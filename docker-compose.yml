@@ -17,3 +17,10 @@ services:
     # 让 Docker 自动读取环境变量文件
     env_file:
       - .env
+
+    # 防止 Docker 的 json-file 日志无限增长
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

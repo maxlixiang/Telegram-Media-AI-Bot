@@ -19,13 +19,22 @@ ALLOWED_USERS=允许使用机器人的 Telegram 用户 ID，多个用英文逗�
 GROQ_API_KEY=你的 Groq API Key
 ```
 
+可选的自动清理配置（不填写时使用默认值）：
+
+```env
+# 下载残留文件最多保留 24 小时
+MEDIA_MAX_AGE_HOURS=24
+# 每 60 分钟扫描一次残留文件
+CLEANUP_INTERVAL_MINUTES=60
+```
+
 `cookies.txt` 是抖音下载使用的 Netscape cookies 文件。`docker-compose.yml` 会把它挂载到容器内：
 
 ```text
 /app/cookies.txt
 ```
 
-本项目没有 SQLite 数据库，也没有必须迁移的长期下载目录。媒体和文稿文件会临时写入 `/var/lib/telegram-bot-api`，发送完成后由程序删除。
+本项目没有 SQLite 数据库，也没有必须迁移的长期下载目录。媒体和文稿文件会临时写入宿主机 `/var/lib/telegram-bot-api`（容器内路径相同）。每个任务结束后，程序会清理该任务的成品、`.part` 文件和音视频合并中间文件；启动后还会定时清理超过保留期的 `media_<UUID>*` 孤儿文件。清理器只匹配这一严格命名规则，不会删除 Telegram Bot API 自身的数据目录。
 
 ## 2. 拉取代码
 
@@ -106,6 +115,8 @@ docker run -d \
   -p 8081:8081 \
   -v /var/lib/telegram-bot-api:/var/lib/telegram-bot-api \
   --env-file /root/telegram-bot-api.env \
+  --log-opt max-size=10m \
+  --log-opt max-file=3 \
   aiogram/telegram-bot-api:latest \
   --dir=/var/lib/telegram-bot-api \
   --temp-dir=/tmp/telegram-bot-api \
@@ -164,7 +175,28 @@ docker logs --tail 100 video_downloader_bot
 
 ## 5. 常见问题
 
-### 5.1 8081 连接失败
+### 5.1 磁盘空间排查与清理
+
+先判断空间被哪一类数据占用：
+
+```bash
+df -h
+sudo du -xh --max-depth=1 /var/lib/telegram-bot-api 2>/dev/null | sort -h
+docker system df
+sudo du -sh /var/lib/docker/containers/* 2>/dev/null | sort -h | tail
+```
+
+查看本项目遗留的媒体文件（不会删除）：
+
+```bash
+sudo find /var/lib/telegram-bot-api -maxdepth 1 -type f -name 'media_*' -printf '%TY-%Tm-%Td %TH:%TM %10s %p\n' | sort
+```
+
+部署新版代码并重启机器人后，超过 `MEDIA_MAX_AGE_HOURS` 的遗留媒体会在启动时自动清理。若需要尽快清理，可以临时在 `.env` 中设置 `MEDIA_MAX_AGE_HOURS=1`，重启并确认日志出现“自动清理临时媒体完成”，之后再改回 24。
+
+Docker Compose 已为媒体机器人设置日志轮转。对于以前创建、没有日志上限的 `telegram-bot-api` 容器，需要按第 3.2 节参数重建；`--log-opt` 只在创建容器时生效。不要直接删除 `/var/lib/telegram-bot-api` 整个目录，其中还包含本地 Telegram Bot API 的工作数据。
+
+### 5.2 8081 连接失败
 
 现象：
 
@@ -187,7 +219,7 @@ docker ps | grep telegram-bot-api
 docker logs --tail 50 telegram-bot-api
 ```
 
-### 5.2 API ID/Hash 无效
+### 5.3 API ID/Hash 无效
 
 日志：
 
@@ -210,7 +242,7 @@ nano /root/telegram-bot-api.env
 
 修正后重新运行 `docker run ...`。
 
-### 5.3 媒体 bot 连接本地 API 失败
+### 5.4 媒体 bot 连接本地 API 失败
 
 日志：
 
@@ -228,7 +260,7 @@ telegram.error.NetworkError: httpx.ConnectError: All connection attempts failed
 3. 再启动 video_downloader_bot
 ```
 
-### 5.4 重建服务
+### 5.5 重建服务
 
 如果需要重新部署：
 
