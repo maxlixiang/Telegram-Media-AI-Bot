@@ -117,22 +117,24 @@ docker run -d \
   -p 8081:8081 \
   -v /var/lib/telegram-bot-api:/var/lib/telegram-bot-api \
   --env-file /root/telegram-bot-api.env \
+  -e TELEGRAM_LOCAL=1 \
   --log-opt max-size=10m \
   --log-opt max-file=3 \
-  aiogram/telegram-bot-api:latest \
-  --dir=/var/lib/telegram-bot-api \
-  --temp-dir=/tmp/telegram-bot-api \
-  --http-port=8081 \
-  --local
+  aiogram/telegram-bot-api:latest
 ```
+
+注意：`aiogram/telegram-bot-api` 镜像通过环境变量生成启动参数。不要把 `--local` 写在镜像名后面；该镜像的入口脚本不会使用这些额外参数。必须设置 `TELEGRAM_LOCAL=1`，否则大文件本地路径会被当作不支持的 URL。
 
 检查服务：
 
 ```bash
 docker ps | grep telegram-bot-api
 docker logs --tail 50 telegram-bot-api
+docker top telegram-bot-api -eo pid,args
 curl http://127.0.0.1:8081
 ```
+
+`docker logs` 或 `docker top` 显示的实际进程参数中必须包含 `--local`。
 
 `curl` 返回 `404` 或类似响应可以接受，只要不是：
 

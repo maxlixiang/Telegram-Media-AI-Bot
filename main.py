@@ -118,6 +118,8 @@ def format_elapsed_time(elapsed_seconds: float) -> str:
 
 def classify_send_error(error: Exception) -> str:
     error_text = str(error).lower()
+    if "invalid file http url" in error_text and "unsupported url protocol" in error_text:
+        return "LOCAL_BOT_API_MODE_INACTIVE"
     if isinstance(error, TimedOut) or "connecttimeout" in error_text or "timedout" in error_text:
         return "UPLOAD_TIMEOUT"
     if isinstance(error, BadRequest):
@@ -136,7 +138,9 @@ def classify_send_error(error: Exception) -> str:
 def build_send_failure_message(error: Exception) -> str:
     error_text = str(error)
     diagnostic_code = classify_send_error(error)
-    if isinstance(error, TimedOut) or "ConnectTimeout" in error_text or "TimedOut" in error_text:
+    if diagnostic_code == "LOCAL_BOT_API_MODE_INACTIVE":
+        message = "发送失败：本地 Telegram Bot API 未真正启用 local 模式，请检查 TELEGRAM_LOCAL 配置"
+    elif isinstance(error, TimedOut) or "ConnectTimeout" in error_text or "TimedOut" in error_text:
         message = "发送失败：Telegram 上传超时，请稍后重试"
     elif isinstance(error, BadRequest):
         if "Request Entity Too Large" in error_text or "file is too big" in error_text.lower():
