@@ -1,4 +1,5 @@
 import asyncio
+import json
 import unittest
 from unittest.mock import AsyncMock, MagicMock, mock_open, patch
 
@@ -90,10 +91,11 @@ class DouyinTests(unittest.TestCase):
             response.url = "https://www.douyin.com/aweme/v1/web/aweme/detail/"
             response.status = 200
             response.headers = {"content-type": "application/json"}
-            response.json = AsyncMock(return_value={"aweme_detail": item})
+            response.body = AsyncMock(return_value=json.dumps({"aweme_detail": item}).encode())
             async def navigate(*args, **kwargs):
                 listeners["request"](MagicMock(url=response.url))
                 listeners["response"](response)
+                listeners["requestfinished"](response.request)
                 await asyncio.sleep(0)
                 return MagicMock(status=200)
             page.goto.side_effect = navigate
@@ -169,6 +171,67 @@ class DouyinTests(unittest.TestCase):
         stats = {"page_read_timeouts": 0, "page_read_errors": 0}
         self.assertIsNone(asyncio.run(_read_page_data(page, "123", stats)))
         self.assertEqual(stats["page_read_timeouts"], 1)
+
+    def _emit_video_response(self, page, listeners, body, finished=None):
+        response = MagicMock()
+        response.url = "https://www.douyin.com/aweme/v1/web/aweme/detail/?ticket=PRIVATE"
+        response.status = 200
+        response.headers = {"content-type": "text/plain; charset=utf-8"}
+        response.body = AsyncMock(return_value=body)
+        async def navigate(*args, **kwargs):
+            listeners["request"](MagicMock(url=response.url))
+            listeners["response"](response)
+            if finished is not None:
+                await finished()
+            listeners["requestfinished"](response.request)
+            await asyncio.sleep(0)
+            return MagicMock(status=200)
+        page.goto.side_effect = navigate
+        return response
+
+    def test_plain_text_json_detail_is_not_skipped(self):
+        item = {"aweme_id": "123", "video": {"play_addr": {"url_list": ["https://cdn.example/a"]}}}
+        with patch("douyin_downloader.async_playwright") as factory:
+            _, browser, _, page, listeners = self._browser_fixture(factory)
+            response = self._emit_video_response(page, listeners, json.dumps({"aweme_detail": item}).encode())
+            self.assertEqual(fetch_douyin_video_meta(page.url)["aweme_id"], "123")
+            response.body.assert_awaited_once()
+            page.evaluate.assert_not_called()
+            browser.close.assert_awaited_once()
+
+    def test_empty_non_json_and_missing_video_are_distinguished(self):
+        from douyin_downloader import _fetch_douyin_video_meta
+        for body, code in [(b"", "VIDEO_EMPTY_RESPONSE"), (b"<html>PRIVATE</html>", "VIDEO_NON_JSON_RESPONSE"), (b'{"status_code": 0}', "VIDEO_JSON_WITHOUT_MEDIA")]:
+            with self.subTest(code=code), patch("douyin_downloader.async_playwright") as factory:
+                _, browser, _, page, listeners = self._browser_fixture(factory)
+                self._emit_video_response(page, listeners, body)
+                with self.assertLogs("douyin_downloader", level="INFO") as logs, self.assertRaisesRegex(DouyinDownloadError, code):
+                    asyncio.run(_fetch_douyin_video_meta(page.url, 0.1))
+                self.assertNotIn("PRIVATE", "\\n".join(logs.output))
+                browser.close.assert_awaited_once()
+
+    def test_response_waits_for_body_before_reading(self):
+        item = {"aweme_id": "123", "video": {"play_addr": {"url_list": ["https://cdn.example/a"]}}}
+        with patch("douyin_downloader.async_playwright") as factory:
+            _, browser, _, page, listeners = self._browser_fixture(factory)
+            async def finish():
+                response.body.assert_not_called()
+                await asyncio.sleep(0.02)
+            response = self._emit_video_response(page, listeners, json.dumps({"aweme_detail": item}).encode(), finish)
+            self.assertEqual(fetch_douyin_video_meta(page.url)["aweme_id"], "123")
+            browser.close.assert_awaited_once()
+
+    def test_unfinished_response_is_cancelled_with_distinct_diagnostic(self):
+        from douyin_downloader import _fetch_douyin_video_meta
+        with patch("douyin_downloader.async_playwright") as factory:
+            _, browser, _, page, listeners = self._browser_fixture(factory)
+            async def unfinished():
+                await asyncio.Future()
+            response = self._emit_video_response(page, listeners, b"", unfinished)
+            with self.assertLogs("douyin_downloader", level="ERROR"), self.assertRaisesRegex(DouyinDownloadError, "VIDEO_BODY_PENDING"):
+                asyncio.run(_fetch_douyin_video_meta(page.url, 0.05))
+            response.body.assert_not_called()
+            browser.close.assert_awaited_once()
 
 
 if __name__ == "__main__":

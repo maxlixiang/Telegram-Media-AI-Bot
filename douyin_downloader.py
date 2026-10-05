@@ -1,5 +1,6 @@
 """通过 Chromium 匿名会话解析抖音，媒体采用流式下载。"""
 import asyncio
+import json
 import logging
 import os
 import threading
@@ -148,6 +149,7 @@ async def _parse_douyin_page(context, url: str, stats: dict):
     page = await context.new_page()
     payloads = deque(maxlen=8)
     tasks = set()
+    pending_responses = {}
     matched = None
     aweme_id = extract_aweme_id(url)
 
@@ -164,6 +166,7 @@ async def _parse_douyin_page(context, url: str, stats: dict):
             logger.info("抖音视频请求 endpoint=%s", _safe_location(request.url))
 
     def on_request_failed(request):
+        pending_responses.pop(request, None)
         if request.resource_type in {"image", "media", "font"}:
             return  # 我们主动阻止的资源不算网络故障。
         stats["request_failures"] += 1
@@ -185,9 +188,32 @@ async def _parse_douyin_page(context, url: str, stats: dict):
 
     async def read_response(response):
         nonlocal matched
+        is_video = _is_video_request(response.url)
         try:
-            data = await asyncio.wait_for(response.json(), timeout=3)
+            # 仅由 requestfinished 事件启动读取，不把网络传输时间算入读取超时。
+            body = await asyncio.wait_for(response.body(), timeout=10 if is_video else 3)
+            if is_video:
+                stats["video_body_bytes"] = len(body)
+                logger.info("抖音视频响应内容 endpoint=%s bytes=%s", _safe_location(response.url), len(body))
+                if not body.strip():
+                    stats["video_empty_responses"] += 1
+                    return
+            try:
+                data = json.loads(body)
+            except (ValueError, UnicodeError):
+                stats["json_read_errors"] += 1
+                if is_video:
+                    stats["video_non_json_responses"] += 1
+                    logger.warning("抖音视频响应不是 JSON endpoint=%s bytes=%s", _safe_location(response.url), len(body))
+                return
             stats["json_responses"] += 1
+            if is_video:
+                stats["video_json_responses"] += 1
+            if is_video and isinstance(data, dict):
+                # 只记录数值业务状态码，不记录正文、票据或媒体地址。
+                api_status = data.get("status_code")
+                if isinstance(api_status, int) and not isinstance(api_status, bool):
+                    stats["video_api_status"] = api_status
             target = aweme_id or extract_aweme_id(page.url)
             if target:
                 item = _find_video(data, target)
@@ -195,8 +221,14 @@ async def _parse_douyin_page(context, url: str, stats: dict):
                     matched = item
             else:
                 payloads.append(data)
-        except (asyncio.TimeoutError, BrowserError, ValueError):
+        except asyncio.TimeoutError:
             stats["json_read_errors"] += 1
+            if is_video:
+                stats["video_body_read_timeouts"] += 1
+        except BrowserError:
+            stats["json_read_errors"] += 1
+            if is_video:
+                stats["video_body_read_errors"] += 1
 
     def on_response(response):
         if response.request.resource_type == "script" and response.status >= 400:
@@ -209,7 +241,18 @@ async def _parse_douyin_page(context, url: str, stats: dict):
             if response.status >= 400:
                 stats["video_http_errors"] += 1
             logger.info("抖音视频响应 endpoint=%s status=%s content_type=%s", _safe_location(response.url), response.status, response.headers.get("content-type", ""))
-        if response.status == 200 and "json" in response.headers.get("content-type", "").lower() and (_is_video_request(response.url) or len(tasks) < 8):
+        # 视频详情即使标为 text/plain，也必须按实际内容尝试解析。
+        is_video = _is_video_request(response.url)
+        if response.status == 200 and (is_video or "json" in response.headers.get("content-type", "").lower()) and (is_video or len(pending_responses) + len(tasks) < 8):
+            pending_responses[response.request] = response
+            if is_video:
+                stats["video_body_started"] += 1
+
+    def on_request_finished(request):
+        response = pending_responses.pop(request, None)
+        if response is not None:
+            if _is_video_request(response.url):
+                stats["video_body_finished"] += 1
             task = asyncio.create_task(read_response(response))
             tasks.add(task)
             task.add_done_callback(tasks.discard)
@@ -219,6 +262,7 @@ async def _parse_douyin_page(context, url: str, stats: dict):
     page.on("requestfailed", on_request_failed)
     page.on("pageerror", on_page_error)
     page.on("response", on_response)
+    page.on("requestfinished", on_request_finished)
     try:
         try:
             response = await page.goto(url, wait_until="commit", timeout=15000)
@@ -254,6 +298,8 @@ async def _parse_douyin_page(context, url: str, stats: dict):
             await asyncio.sleep(0.25)
     finally:
         page.remove_listener("response", on_response)
+        page.remove_listener("requestfinished", on_request_finished)
+        pending_responses.clear()
         for task in list(tasks):
             task.cancel()
         if tasks:
@@ -267,6 +313,18 @@ def _diagnostic_code(stats: dict) -> str:
         return "VIDEO_HTTP_ERROR"
     if stats["video_request_failures"]:
         return "VIDEO_REQUEST_FAILED"
+    if stats["video_empty_responses"]:
+        return "VIDEO_EMPTY_RESPONSE"
+    if stats["video_non_json_responses"]:
+        return "VIDEO_NON_JSON_RESPONSE"
+    if stats["video_json_responses"]:
+        return "VIDEO_JSON_WITHOUT_MEDIA"
+    if stats["video_body_read_timeouts"]:
+        return "VIDEO_BODY_READ_TIMEOUT"
+    if stats["video_body_read_errors"]:
+        return "VIDEO_BODY_READ_ERROR"
+    if stats["video_body_started"] > stats["video_body_finished"]:
+        return "VIDEO_BODY_PENDING"
     if stats["script_http_errors"] or stats["script_request_failures"]:
         return "SCRIPT_LOAD_FAILED"
     if stats["page_read_timeouts"] >= 2:
@@ -277,7 +335,7 @@ def _diagnostic_code(stats: dict) -> str:
 
 
 async def _fetch_douyin_video_meta(url: str, timeout: int) -> dict:
-    stats = dict.fromkeys(("video_requests", "video_responses", "video_http_errors", "video_request_failures", "json_responses", "json_read_errors", "request_failures", "invalid_requests", "script_errors", "script_http_errors", "script_request_failures", "page_read_timeouts", "page_read_errors", "blocked_resources"), 0)
+    stats = dict.fromkeys(("video_requests", "video_responses", "video_http_errors", "video_request_failures", "video_body_started", "video_body_finished", "video_body_bytes", "video_empty_responses", "video_non_json_responses", "video_json_responses", "video_body_read_timeouts", "video_body_read_errors", "json_responses", "json_read_errors", "request_failures", "invalid_requests", "script_errors", "script_http_errors", "script_request_failures", "page_read_timeouts", "page_read_errors", "blocked_resources"), 0)
     stats.update(captcha=False, video_loading=False, ready_state="unknown", navigation_timeout=False)
     started = time.monotonic()
     async with async_playwright() as playwright:

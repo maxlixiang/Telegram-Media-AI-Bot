@@ -97,12 +97,20 @@ docker compose exec tg_media_bot python -c 'from douyin_downloader import fetch_
 | CAPTCHA_REQUIRED | 页面检测到验证提示 |
 | VIDEO_HTTP_ERROR | 视频相关接口出现 HTTP 4xx/5xx |
 | VIDEO_REQUEST_FAILED | 视频相关请求出现浏览器网络错误 |
+| VIDEO_EMPTY_RESPONSE | 视频接口收到完整响应，但正文为空 |
+| VIDEO_NON_JSON_RESPONSE | 视频接口正文不是有效 JSON |
+| VIDEO_JSON_WITHOUT_MEDIA | 视频接口返回 JSON，但未匹配目标媒体；日志记录数值业务状态码 |
+| VIDEO_BODY_READ_TIMEOUT | 完整响应到达后，读取正文超时 |
+| VIDEO_BODY_READ_ERROR | 完整响应到达后，浏览器无法读取正文 |
+| VIDEO_BODY_PENDING | 总超时前未观察到视频响应接收完成 |
 | SCRIPT_LOAD_FAILED | 页面脚本请求失败或返回 HTTP 4xx/5xx |
 | PAGE_UNRESPONSIVE | 多次读取页面数据超时 |
 | NO_VIDEO_REQUEST | 超时前未观察到当前识别范围内的视频接口请求 |
 | VIDEO_DATA_MISSING | 观察到了视频请求，但未匹配到有效视频数据 |
 
 代码是诊断线索，不等同于确认 IP 风控或内存不足。`invalid/ ERR_BLOCKED_BY_CLIENT` 单独计数，本机成功时也可能出现。主动拦截的图片、媒体和字体不计入网络失败。日志只记录请求域名和路径，不记录签名查询参数或 Cookie；httpx 的 INFO 请求日志关闭，避免输出 Bot Token。
+
+视频接口不依赖 Content-Type 判断是否读取；即使标为 text/plain，也按正文尝试 JSON 解析。收到响应头后等待 requestfinished，再开始正文读取计时；视频正文读取最多等待 10 秒，全部操作仍受解析总超时限制。日志只记录正文字节数和数值业务状态码，不输出响应正文。
 
 ```bash
 docker logs --since 10m video_downloader_bot 2>&1 | tail -n 120
