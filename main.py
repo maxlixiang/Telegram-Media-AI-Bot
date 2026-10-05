@@ -23,6 +23,8 @@ from douyin_downloader import DouyinDownloadError
 from ai_services import process_groq_transcription, format_text_with_llm
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+# HTTP 请求日志会包含 Bot Token；保留网络异常，关闭 INFO 请求地址输出。
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 URL_PATTERN = re.compile(r'https?://[^\s<>"\'\u3000，。！？；：、（）【】《》]+', re.IGNORECASE)
 URL_TRAILING_NOISE = '.,!?;:)]}>\'"，。！？；：、）】》'

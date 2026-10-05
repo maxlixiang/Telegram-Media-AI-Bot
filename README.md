@@ -22,15 +22,16 @@
 
 1. 启动 Playwright 自带的完整 Chromium（`channel="chromium"`，`headless=True`）。
 2. 新建隔离的匿名浏览器上下文，使用 Windows 桌面 UA、中文 locale 和上海时区。
-3. 在导航前监听抖音 JSON 网络响应，并读取浏览器执行页面脚本后产生的数据。
-4. 通过作品 ID 匹配目标视频，避免误下载推荐视频。
-5. 提取播放地址及备用地址，关闭浏览器后流式下载 MP4。
-6. 使用此次匿名会话产生的必要 Cookie，保留域名和路径限制，不读取用户登录 Cookie。
-7. 检查 MP4 文件头与已知内容长度；候选地址失败时尝试备用地址。
+3. 在导航前监听抖音 JSON 网络响应，导航只等待响应开始（commit），不等待 DOMContentLoaded。
+4. 屏蔽图片、字体和媒体播放请求，保留脚本和数据接口；取得视频信息后立即退出浏览器。
+5. 通过作品 ID 匹配目标视频，避免误下载推荐视频。
+6. 提取播放地址及备用地址，关闭浏览器后流式下载 MP4。
+7. 使用此次匿名会话产生的必要 Cookie，保留域名和路径限制，不读取用户登录 Cookie。
+8. 检查 MP4 文件头与已知内容长度；候选地址失败时尝试备用地址。
 
 不再依赖 `cookies.txt`、Node.js、jsdom 或手工生成 `a_bogus`。旧签名文件保留在仓库中，但不再被主流程调用。
 
-浏览器解析串行执行，避免并发启动多个浏览器占用 VPS 内存。每个任务结束后关闭浏览器，不保存登录状态。默认解析等待 60 秒，可在 `.env` 配置：
+浏览器解析串行执行，避免并发启动多个浏览器占用 VPS 内存。每个任务结束后关闭浏览器，不保存登录状态。解析阶段采用异步总超时，默认 60 秒（浏览器启动最多额外等待 15 秒）。页面数据每隔约 5 秒读取一次，每次最多等待 2 秒；只传回目标作品，限制缓存和普通 JSON 读取并发，优先处理视频详情响应。可在 `.env` 配置：
 
 ```env
 DOUYIN_BROWSER_TIMEOUT_SECONDS=60
@@ -86,3 +87,23 @@ docker compose exec tg_media_bot python -c 'from douyin_downloader import fetch_
 - `cleanup.py`：任务文件与过期残留清理。
 - `config.py`：环境变量和运行参数。
 - `twitter_probe.py`：独立诊断脚本，未接入主下载流程。
+
+## VPS 解析诊断（2026-10-05）
+
+失败时机器人提示诊断代码，容器日志记录“抖音视频请求”“抖音视频响应”和“抖音解析诊断”，包括作品 ID、响应状态、页面 readyState、JSON 数量、请求失败及页面读取超时次数。无需额外启动诊断浏览器。
+
+| 代码 | 观察到的情况 |
+| --- | --- |
+| CAPTCHA_REQUIRED | 页面检测到验证提示 |
+| VIDEO_HTTP_ERROR | 视频相关接口出现 HTTP 4xx/5xx |
+| VIDEO_REQUEST_FAILED | 视频相关请求出现浏览器网络错误 |
+| SCRIPT_LOAD_FAILED | 页面脚本请求失败或返回 HTTP 4xx/5xx |
+| PAGE_UNRESPONSIVE | 多次读取页面数据超时 |
+| NO_VIDEO_REQUEST | 超时前未观察到当前识别范围内的视频接口请求 |
+| VIDEO_DATA_MISSING | 观察到了视频请求，但未匹配到有效视频数据 |
+
+代码是诊断线索，不等同于确认 IP 风控或内存不足。`invalid/ ERR_BLOCKED_BY_CLIENT` 单独计数，本机成功时也可能出现。主动拦截的图片、媒体和字体不计入网络失败。日志只记录请求域名和路径，不记录签名查询参数或 Cookie；httpx 的 INFO 请求日志关闭，避免输出 Bot Token。
+
+```bash
+docker logs --since 10m video_downloader_bot 2>&1 | tail -n 120
+```

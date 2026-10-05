@@ -315,3 +315,9 @@ docker compose exec tg_media_bot python -c 'from douyin_downloader import fetch_
 ```
 
 Docker Compose 已设置 init 和共享内存。浏览器任务串行执行，并在每次解析后关闭；VPS 出口触发风控时仍可能出现验证码，不保证所有机房 IP 可用。
+
+### 7.1 小内存 VPS 的解析优化与诊断
+
+导航只等待 commit，屏蔽图片、媒体和字体，保留页面脚本和数据接口。页面数据读取每隔约 5 秒执行一次，每次等待上限为 2 秒，解析阶段默认总等待为 60 秒；无需为本方案先升级机器或配置代理。资源峰值和具体站点访问行为仍须在 VPS 实测。
+
+失败后直接查看机器人诊断代码及容器日志，不要同时启动额外的诊断浏览器。诊断代码说明见 README 的“VPS 解析诊断”。网络失败日志不包含查询签名或 Cookie，httpx INFO 请求地址日志已关闭。Compose 已去掉过时的 version 字段。

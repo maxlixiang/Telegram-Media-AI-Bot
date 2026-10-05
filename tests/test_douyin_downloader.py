@@ -1,5 +1,6 @@
+import asyncio
 import unittest
-from unittest.mock import MagicMock, mock_open, patch
+from unittest.mock import AsyncMock, MagicMock, mock_open, patch
 
 import requests
 
@@ -7,7 +8,7 @@ from douyin_downloader import (
     DouyinDownloadError, _find_video, _video_urls,
     download_douyin_video, download_file, extract_aweme_id, fetch_douyin_video_meta,
 )
-from playwright.sync_api import Error as BrowserError
+from playwright.async_api import Error as BrowserError
 
 
 class DouyinTests(unittest.TestCase):
@@ -63,46 +64,111 @@ class DouyinTests(unittest.TestCase):
             self.assertEqual(download.call_count, 2)
             self.assertEqual(download.call_args.args[0], "https://cdn.example/b")
 
+    def _browser_fixture(self, factory):
+        playwright = factory.return_value.__aenter__.return_value
+        browser = MagicMock()
+        context = MagicMock()
+        page = MagicMock()
+        playwright.chromium.launch = AsyncMock(return_value=browser)
+        browser.new_context = AsyncMock(return_value=context)
+        browser.close = AsyncMock()
+        context.new_page = AsyncMock(return_value=page)
+        context.cookies = AsyncMock(return_value=[])
+        context.route = AsyncMock()
+        page.goto = AsyncMock(return_value=MagicMock(status=200))
+        page.evaluate = AsyncMock(return_value={"item": None, "ready_state": "complete", "captcha": False, "video_loading": True})
+        page.url = "https://www.douyin.com/video/123"
+        listeners = {}
+        page.on.side_effect = lambda name, fn: listeners.update({name: fn})
+        return playwright, browser, context, page, listeners
+
     def test_browser_reads_network_data_in_fresh_windows_context(self):
         item = {"aweme_id": "123", "video": {"play_addr": {"url_list": ["https://cdn.example/a"]}}}
-        with patch("douyin_downloader.sync_playwright") as factory:
-            playwright = factory.return_value.__enter__.return_value
-            browser = playwright.chromium.launch.return_value
-            context = browser.new_context.return_value
-            page = context.new_page.return_value
-            page.url = "https://www.douyin.com/video/123"
-            context.cookies.return_value = []
+        with patch("douyin_downloader.async_playwright") as factory:
+            playwright, browser, context, page, listeners = self._browser_fixture(factory)
             response = MagicMock()
             response.url = "https://www.douyin.com/aweme/v1/web/aweme/detail/"
             response.status = 200
             response.headers = {"content-type": "application/json"}
-            response.json.return_value = {"aweme_detail": item}
-            page.goto.side_effect = lambda *args, **kwargs: page.on.call_args.args[1](response)
+            response.json = AsyncMock(return_value={"aweme_detail": item})
+            async def navigate(*args, **kwargs):
+                listeners["request"](MagicMock(url=response.url))
+                listeners["response"](response)
+                await asyncio.sleep(0)
+                return MagicMock(status=200)
+            page.goto.side_effect = navigate
             meta = fetch_douyin_video_meta("https://v.douyin.com/short/")
             self.assertEqual(meta["aweme_id"], "123")
             self.assertIn("Windows NT", browser.new_context.call_args.kwargs["user_agent"])
             self.assertTrue(playwright.chromium.launch.call_args.kwargs["headless"])
             self.assertEqual(playwright.chromium.launch.call_args.kwargs["channel"], "chromium")
+            self.assertEqual(page.goto.call_args.kwargs["wait_until"], "commit")
+            page.evaluate.assert_not_called()
             context.add_cookies.assert_not_called()
-            browser.close.assert_called_once()
+            browser.close.assert_awaited_once()
+            handler = context.route.call_args.args[1]
+            for kind in ("image", "media", "font", "script", "xhr", "fetch", "document"):
+                route = MagicMock()
+                route.request.resource_type = kind
+                route.abort = AsyncMock()
+                route.continue_ = AsyncMock()
+                asyncio.run(handler(route))
+                if kind in {"image", "media", "font"}:
+                    route.abort.assert_awaited_once()
+                    route.continue_.assert_not_called()
+                else:
+                    route.continue_.assert_awaited_once()
+                    route.abort.assert_not_called()
 
     def test_browser_reads_executed_page_data_when_no_json_response(self):
         item = {"aweme_id": "123", "video": {"play_addr": {"url_list": ["https://cdn.example/a"]}}}
-        with patch("douyin_downloader.sync_playwright") as factory:
-            browser = factory.return_value.__enter__.return_value.chromium.launch.return_value
-            page = browser.new_context.return_value.new_page.return_value
-            page.url = "https://www.douyin.com/video/123"
-            page.evaluate.return_value = [{"loaderData": {"item_list": [item]}}]
+        with patch("douyin_downloader.async_playwright") as factory:
+            _, browser, _, page, _ = self._browser_fixture(factory)
+            page.evaluate.return_value = {"item": item, "ready_state": "interactive", "captcha": False, "video_loading": False}
             self.assertEqual(fetch_douyin_video_meta(page.url)["video_urls"], ["https://cdn.example/a"])
-            browser.close.assert_called_once()
+            browser.close.assert_awaited_once()
 
     def test_browser_failure_releases_serialization_lock(self):
         from douyin_downloader import _BROWSER_LOCK
-        with patch("douyin_downloader.sync_playwright") as factory:
-            factory.return_value.__enter__.return_value.chromium.launch.side_effect = BrowserError("missing browser")
+        with patch("douyin_downloader.async_playwright") as factory:
+            playwright, _, _, _, _ = self._browser_fixture(factory)
+            playwright.chromium.launch.side_effect = BrowserError("missing browser")
             with self.assertLogs("douyin_downloader", level="ERROR"), self.assertRaises(DouyinDownloadError):
                 fetch_douyin_video_meta("https://www.douyin.com/video/123")
             self.assertFalse(_BROWSER_LOCK.locked())
+
+    def test_total_timeout_closes_browser_and_logs_without_query_secrets(self):
+        from douyin_downloader import _fetch_douyin_video_meta
+        with patch("douyin_downloader.async_playwright") as factory:
+            _, browser, _, page, listeners = self._browser_fixture(factory)
+            async def navigate(*args, **kwargs):
+                request = MagicMock(url="https://www.douyin.com/aweme/v1/web/aweme/detail/?secret=PRIVATE", resource_type="fetch", failure="net::ERR_FAILED")
+                listeners["request"](request)
+                listeners["requestfailed"](request)
+                return MagicMock(status=200)
+            page.goto.side_effect = navigate
+            with self.assertLogs("douyin_downloader", level="INFO") as logs, self.assertRaisesRegex(DouyinDownloadError, "VIDEO_REQUEST_FAILED"):
+                asyncio.run(_fetch_douyin_video_meta(page.url, 0.05))
+            self.assertNotIn("PRIVATE", "\n".join(logs.output))
+            browser.close.assert_awaited_once()
+
+    def test_captcha_is_reported_and_browser_closed(self):
+        with patch("douyin_downloader.async_playwright") as factory:
+            _, browser, _, page, _ = self._browser_fixture(factory)
+            page.evaluate.return_value = {"item": None, "ready_state": "complete", "captcha": True, "video_loading": False}
+            with self.assertLogs("douyin_downloader", level="ERROR"), self.assertRaisesRegex(DouyinDownloadError, "CAPTCHA_REQUIRED"):
+                fetch_douyin_video_meta(page.url)
+            browser.close.assert_awaited_once()
+
+    def test_page_read_timeout_does_not_hang_parser(self):
+        from douyin_downloader import _read_page_data
+        page = MagicMock()
+        async def stuck(*args):
+            await asyncio.Future()
+        page.evaluate = AsyncMock(side_effect=stuck)
+        stats = {"page_read_timeouts": 0, "page_read_errors": 0}
+        self.assertIsNone(asyncio.run(_read_page_data(page, "123", stats)))
+        self.assertEqual(stats["page_read_timeouts"], 1)
 
 
 if __name__ == "__main__":
