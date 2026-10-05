@@ -1,15 +1,12 @@
 # 使用官方轻量级 Python 镜像作为基础
-FROM python:3.10-slim
+FROM python:3.10-slim-bookworm
 
-# 设定时区，并安装关键系统依赖 ffmpeg 与 Node.js
+# 设定时区，并安装媒体处理依赖
 RUN apt-get update && apt-get install -y \
     ffmpeg \
-    nodejs \
-    npm \
     tzdata \
     && ln -snf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
-    && echo "Asia/Shanghai" > /etc/timezone \
-    && rm -rf /var/lib/apt/lists/*
+    && echo "Asia/Shanghai" > /etc/timezone
 
 # 设置工作目录
 WORKDIR /app
@@ -18,11 +15,12 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# 安装完整 Chromium 和 Linux 依赖，使用新无头模式，无需系统 Chrome。
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN python -m playwright install --with-deps --no-shell chromium
+
 # 复制项目中的所有代码到容器内
 COPY . .
-
-# 安装抖音签名脚本依赖
-RUN npm install jsdom
 
 # 启动机器人
 CMD ["python", "main.py"]

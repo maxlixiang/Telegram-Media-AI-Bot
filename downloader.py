@@ -6,11 +6,10 @@ import logging
 from urllib.parse import urlparse
 import yt_dlp
 
-from douyin_downloader import COOKIE_FILE, download_file, fetch_douyin_video_meta, load_douyin_cookie_header
+from douyin_downloader import download_douyin_video
 from twitter_downloader import download_file as download_twitter_file
 from twitter_downloader import fetch_twitter_video_meta, is_twitter_url
 
-COOKIE_FILE = '/app/cookies.txt'
 DOUYIN_HOSTS = {"douyin.com", "www.douyin.com", "v.douyin.com", "iesdouyin.com"}
 logger = logging.getLogger(__name__)
 
@@ -67,17 +66,8 @@ def extract_audio_to_mp3(input_video_path: str, output_mp3_path: str) -> str:
 
 
 def download_douyin_media(url: str, filepath_base: str, is_audio: bool) -> str:
-    cookie_header, cookie_names = load_douyin_cookie_header(COOKIE_FILE)
-    logger.info(
-        "抖音 Cookie 读取结果 raw_url=%s cookie_loaded=%s cookie_names=%s",
-        url,
-        bool(cookie_names),
-        cookie_names,
-    )
-
-    media_meta = fetch_douyin_video_meta(url, cookie_header)
     mp4_path = filepath_base + ".mp4"
-    download_file(media_meta["video_url"], mp4_path, media_meta["headers"])
+    download_douyin_video(url, mp4_path)
 
     if not is_audio:
         return mp4_path

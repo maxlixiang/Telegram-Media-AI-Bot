@@ -5,6 +5,8 @@ services:
     build: .
     container_name: video_downloader_bot
     restart: unless-stopped
+    init: true
+    shm_size: '512mb'
     
     # 【核心魔法 1】：共享主机网络
     network_mode: "host" 
@@ -12,7 +14,6 @@ services:
     # 【核心魔法 2】：文件夹穿透映射
     volumes:
       - /var/lib/telegram-bot-api:/var/lib/telegram-bot-api
-      - ./cookies.txt:/app/cookies.txt:ro
       
     # 让 Docker 自动读取环境变量文件
     env_file:

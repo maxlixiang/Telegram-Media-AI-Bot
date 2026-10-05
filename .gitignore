@@ -12,3 +12,6 @@ telegram-bot-api.env
 *.mp4
 *.mp3
 media_*/
+
+# 本地匿名浏览器验证运行时，不提交浏览器二进制或下载样本
+.local-douyin-test-runtime/

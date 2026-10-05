@@ -19,6 +19,7 @@ from config import (
 )
 from cleanup import cleanup_stale_media_files, cleanup_task_files
 from downloader import sync_download
+from douyin_downloader import DouyinDownloadError
 from ai_services import process_groq_transcription, format_text_with_llm
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -433,6 +434,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
         await status_msg.delete()
 
+    except DouyinDownloadError as e:
+        await status_msg.edit_text(f"抖音处理失败：{e}")
+        logging.exception("抖音任务失败")
     except Exception as e:
         await status_msg.edit_text(f"发生了一些意外错误😵")
         logging.error(f"全局错误: {e}")

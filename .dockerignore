@@ -1,0 +1,12 @@
+.git
+.env
+cookies.txt
+telegram-bot-api.env
+.local-*
+.venv*
+venv
+__pycache__
+*.pyc
+*.mp4
+*.mp3
+tests

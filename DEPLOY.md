@@ -1,6 +1,6 @@
 # Telegram Media AI Bot 部署说明
 
-本文记录将本项目部署或迁移到新 VPS 的步骤。项目仓库代码可以从 GitHub 拉取，但 `.env` 和 `cookies.txt` 不会提交到仓库，需要手动迁移。
+本文记录将本项目部署或迁移到新 VPS 的步骤。项目仓库代码可以从 GitHub 拉取，但 `.env` 不会提交到仓库，需要手动迁移。抖音改为匿名 Chromium 解析，不再需要 cookies.txt。
 
 ## 1. 需要准备的文件
 
@@ -8,7 +8,6 @@
 
 ```text
 .env
-cookies.txt
 ```
 
 `.env` 至少包含：
@@ -30,11 +29,9 @@ CLEANUP_INTERVAL_MINUTES=60
 TELEGRAM_UPLOAD_TIMEOUT_SECONDS=1800
 ```
 
-`cookies.txt` 是抖音下载使用的 Netscape cookies 文件。`docker-compose.yml` 会把它挂载到容器内：
+抖音解析使用 Playwright 自带的完整 Chromium、新无头模式、Windows UA 和全新匿名会话。Docker 构建自动安装浏览器与 Linux 依赖；无需系统 Chrome、桌面或登录 Cookie。首次构建需要访问 Playwright 下载源。
 
-```text
-/app/cookies.txt
-```
+可选配置 `DOUYIN_BROWSER_TIMEOUT_SECONDS=60`，控制解析等待时间。若触发验证码，先查看机器人提示和容器日志，确认服务器出口网络是否允许匿名访问。
 
 本项目没有 SQLite 数据库，也没有必须迁移的长期下载目录。媒体和文稿文件会临时写入宿主机 `/var/lib/telegram-bot-api`（容器内路径相同）。每个任务结束后，程序会清理该任务的成品、`.part` 文件和音视频合并中间文件；启动后还会定时清理超过保留期的 `media_<UUID>*` 孤儿文件。清理器只匹配这一严格命名规则，不会删除 Telegram Bot API 自身的数据目录。
 
@@ -47,12 +44,12 @@ git clone https://github.com/maxlixiang/Telegram-Media-AI-Bot.git /root/Telegram
 cd /root/Telegram-Media-AI-Bot
 ```
 
-把 `.env` 和 `cookies.txt` 上传到 `/root/Telegram-Media-AI-Bot`。
+把 `.env` 上传到 `/root/Telegram-Media-AI-Bot`。
 
 检查文件：
 
 ```bash
-ls -lah .env cookies.txt docker-compose.yml Dockerfile
+ls -lah .env docker-compose.yml Dockerfile
 ```
 
 ## 3. 部署本地 Telegram Bot API
@@ -289,7 +286,6 @@ docker rm -f telegram-bot-api
 
 ```text
 .env
-cookies.txt
 ```
 
 新 VPS 额外需要重新准备：
@@ -301,3 +297,21 @@ telegram-bot-api Docker 容器
 ```
 
 项目代码建议直接从 GitHub 重新 clone。
+
+## 7. 匿名抖音下载验证（2026-10-05）
+
+新版不再挂载 cookies.txt。推送 main 会触发现有 GitHub Actions 自动构建部署，首次下载 Chromium 可能比旧版部署慢。
+
+部署后查看日志，再向机器人发送公开抖音分享链接，依次测试视频、音频和文稿。成功日志包含“抖音匿名解析成功”、作品 ID 和候选地址数量；日志不输出匿名 Cookie 或完整媒体签名地址。
+
+```bash
+docker logs --tail 100 video_downloader_bot
+```
+
+若需要独立检查解析，不要启动第二个机器人轮询进程，使用：
+
+```bash
+docker compose exec tg_media_bot python -c 'from douyin_downloader import fetch_douyin_video_meta; m=fetch_douyin_video_meta("https://v.douyin.com/usslc6OROu8/"); print(m["aweme_id"], len(m["video_urls"]))'
+```
+
+Docker Compose 已设置 init 和共享内存。浏览器任务串行执行，并在每次解析后关闭；VPS 出口触发风控时仍可能出现验证码，不保证所有机房 IP 可用。

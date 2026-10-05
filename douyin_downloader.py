@@ -1,224 +1,203 @@
+"""通过 Chromium 匿名会话解析抖音，媒体采用流式下载。"""
 import logging
-import random
+import os
+import threading
 import time
-from collections import OrderedDict
-from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import requests
-
-from douyin_a_bogus import get_a_bogus
-
+from playwright.sync_api import Error as BrowserError
+from playwright.sync_api import TimeoutError as BrowserTimeout
+from playwright.sync_api import sync_playwright
 
 logger = logging.getLogger(__name__)
-
-COOKIE_FILE = "/app/cookies.txt"
-DOUYIN_COOKIE_SUFFIXES = (
-    "douyin.com",
-    ".douyin.com",
-    "www.douyin.com",
-    "v.douyin.com",
-    "www.douyin.com",
-    "iesdouyin.com",
-    ".iesdouyin.com",
-)
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
+_BROWSER_LOCK = threading.Lock()
 
 
-def load_douyin_cookie_header(cookie_file: str = COOKIE_FILE) -> tuple[str, list[str]]:
-    cookie_path = Path(cookie_file)
-    if not cookie_path.exists():
-        raise FileNotFoundError("抖音下载缺少 cookies.txt，请将 cookies.txt 挂载到 /app/cookies.txt")
-
-    now = int(time.time())
-    cookies: OrderedDict[str, str] = OrderedDict()
-    for line in cookie_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-
-        parts = stripped.split("\t")
-        if len(parts) != 7:
-            continue
-
-        domain, _, _, _, expires, name, value = parts
-        domain = domain.strip().lower()
-        if not any(domain == suffix or domain.endswith(suffix) for suffix in DOUYIN_COOKIE_SUFFIXES):
-            continue
-
-        expires = expires.strip()
-        if expires.isdigit():
-            expires_at = int(expires)
-            if expires_at > 0 and expires_at < now:
-                continue
-
-        cookies[name] = value
-
-    if not cookies:
-        raise RuntimeError("cookies.txt 中未找到可用的抖音 Cookie")
-
-    return "; ".join(f"{name}={value}" for name, value in cookies.items()), list(cookies.keys())
+class DouyinDownloadError(RuntimeError):
+    """可直接展示给用户的抖音错误。"""
 
 
-def resolve_douyin_url(url: str, cookie_header: str, user_agent: str = DEFAULT_USER_AGENT) -> str:
-    session = requests.Session()
-    response = session.get(
-        url,
-        headers={
-            "User-Agent": user_agent,
-            "Cookie": cookie_header,
-            "Referer": "https://www.douyin.com/",
-        },
-        allow_redirects=True,
-        timeout=15,
-    )
-    response.raise_for_status()
-    return response.url
-
-
-def extract_aweme_id(url: str) -> str:
+def extract_aweme_id(url: str) -> str | None:
     parsed = urlparse(url)
-    path_parts = [part for part in parsed.path.split("/") if part]
-    for index, part in enumerate(path_parts):
-        if part == "video" and index + 1 < len(path_parts) and path_parts[index + 1].isdigit():
-            return path_parts[index + 1]
-
+    parts = [part for part in parsed.path.split("/") if part]
+    for index, part in enumerate(parts[:-1]):
+        if part in {"video", "note"} and parts[index + 1].isdigit():
+            return parts[index + 1]
     query = parse_qs(parsed.query)
-    for key in ("aweme_id", "modal_id"):
+    for key in ("aweme_id", "modal_id", "item_id"):
         value = query.get(key, [None])[0]
         if value and value.isdigit():
             return value
-
-    raise RuntimeError("抖音链接解析失败，未提取到 aweme_id")
-
-
-def generate_ms_token(length: int = 107) -> str:
-    alphabet = "ABCDEFGHIGKLMNOPQRSTUVWXYZabcdefghigklmnopqrstuvwxyz0123456789="
-    return "".join(random.choice(alphabet) for _ in range(length))
-
-
-def build_douyin_detail_api_url(aweme_id: str, ms_token: str) -> str:
-    return (
-        "https://www.douyin.com/aweme/v1/web/aweme/detail/"
-        "?device_platform=webapp"
-        "&aid=6383"
-        "&channel=channel_pc_web"
-        f"&aweme_id={aweme_id}"
-        "&update_version_code=170400"
-        "&pc_client_type=1"
-        "&version_code=190500"
-        "&version_name=19.5.0"
-        "&cookie_enabled=true"
-        "&screen_width=1440"
-        "&screen_height=900"
-        "&browser_language=zh-CN"
-        "&browser_platform=Win32"
-        "&browser_name=Chrome"
-        "&browser_version=124.0.0.0"
-        "&browser_online=true"
-        "&engine_name=Blink"
-        "&engine_version=124.0.0.0"
-        "&os_name=Windows"
-        "&os_version=10"
-        "&cpu_core_num=8"
-        "&device_memory=8"
-        "&platform=PC"
-        "&downlink=10"
-        "&effective_type=4g"
-        "&round_trip_time=50"
-        "&webid=7319780293514495522"
-        "&verifyFp=verify_lw66uj9x_y69HTWBr_NOK0_4O0k_As0k_vZiOREH3U5SC"
-        "&fp=verify_lw66uj9x_y69HTWBr_NOK0_4O0k_As0k_vZiOREH3U5SC"
-        f"&msToken={ms_token}"
-    )
-
-
-def sign_douyin_api_url(api_url: str, user_agent: str, cookie_header: str) -> tuple[str, int, str, str]:
-    query = urlparse(api_url).query
-    a_bogus, returncode, stdout, stderr = get_a_bogus(query, user_agent, cookie_header)
-    separator = "&" if "?" in api_url else "?"
-    return f"{api_url}{separator}a_bogus={a_bogus}", returncode, stdout, stderr
-
-
-def _pick_video_url(aweme_detail: dict) -> str | None:
-    video = aweme_detail.get("video") or {}
-    for key in ("play_addr", "play_addr_265", "play_addr_h264"):
-        url_list = ((video.get(key) or {}).get("url_list") or [])
-        if url_list:
-            return url_list[0]
-
-    bit_rate = video.get("bit_rate") or []
-    for item in bit_rate:
-        url_list = ((item.get("play_addr") or {}).get("url_list") or [])
-        if url_list:
-            return url_list[0]
     return None
 
 
-def fetch_douyin_video_meta(url: str, cookie_header: str) -> dict:
-    logger.info("开始解析抖音链接 raw_url=%s", url)
-    resolved_url = resolve_douyin_url(url, cookie_header, DEFAULT_USER_AGENT)
-    aweme_id = extract_aweme_id(resolved_url)
+def _video_urls(item: dict) -> list[str]:
+    video = item.get("video") or {}
+    if not isinstance(video, dict):
+        return []
+    addresses = [video.get(key) for key in ("play_addr", "playAddr", "play_addr_h264", "play_addr_265")]
+    for variant in video.get("bit_rate") or []:
+        if isinstance(variant, dict):
+            addresses.append(variant.get("play_addr"))
+    urls = []
+    for address in addresses:
+        if isinstance(address, str):
+            candidates = [address]
+        elif isinstance(address, dict):
+            candidates = address.get("url_list") or address.get("urlList") or []
+        else:
+            continue
+        for candidate in candidates:
+            if isinstance(candidate, str) and urlparse(candidate).scheme in {"http", "https"} and candidate not in urls:
+                urls.append(candidate)
+    return urls
 
-    logger.info("抖音链接解析完成 raw_url=%s resolved_url=%s aweme_id=%s", url, resolved_url, aweme_id)
-    ms_token = generate_ms_token()
-    api_url = build_douyin_detail_api_url(aweme_id, ms_token)
-    signed_url, node_returncode, node_stdout, node_stderr = sign_douyin_api_url(api_url, DEFAULT_USER_AGENT, cookie_header)
 
-    logger.info(
-        "抖音签名完成 aweme_id=%s node_returncode=%s node_stdout_preview=%s node_stderr_preview=%s",
-        aweme_id,
-        node_returncode,
-        node_stdout[:300],
-        node_stderr[:300],
-    )
+def _find_video(payload, aweme_id: str) -> dict | None:
+    # 必须匹配作品 ID，防止误下载推荐视频。
+    if isinstance(payload, dict):
+        item_id = payload.get("aweme_id") or payload.get("awemeId") or payload.get("item_id")
+        if str(item_id) == aweme_id and _video_urls(payload):
+            return payload
+        for value in payload.values():
+            found = _find_video(value, aweme_id)
+            if found:
+                return found
+    elif isinstance(payload, list):
+        for value in payload:
+            found = _find_video(value, aweme_id)
+            if found:
+                return found
+    return None
 
-    response = requests.get(
-        signed_url,
-        headers={
-            "User-Agent": DEFAULT_USER_AGENT,
-            "Referer": f"https://www.douyin.com/video/{aweme_id}",
-            "Accept": "application/json, text/plain, */*",
-            "Cookie": cookie_header,
-        },
-        timeout=15,
-    )
-    logger.info(
-        "抖音详情接口响应 aweme_id=%s status_code=%s body_preview=%s",
-        aweme_id,
-        response.status_code,
-        response.text[:500],
-    )
-    response.raise_for_status()
 
-    payload = response.json()
-    aweme_detail = payload.get("aweme_detail") or {}
-    video_url = _pick_video_url(aweme_detail)
-    if not video_url:
-        raise RuntimeError("抖音接口返回异常，未获取到视频地址")
-
-    return {
-        "aweme_id": aweme_id,
-        "resolved_url": resolved_url,
-        "video_url": video_url,
-        "title": aweme_detail.get("desc") or aweme_detail.get("caption") or "",
-        "headers": {
-            "User-Agent": DEFAULT_USER_AGENT,
-            "Referer": f"https://www.douyin.com/video/{aweme_id}",
-            "Cookie": cookie_header,
-        },
+# 读取浏览器执行脚本后的数据，不使用 eval 或另行请求旧详情接口。
+_PAGE_DATA = """() => {
+    const result = [window._ROUTER_DATA, window.RENDER_DATA].filter(Boolean);
+    for (const script of document.querySelectorAll('script[type="application/json"], script#RENDER_DATA, script#__NEXT_DATA__')) {
+        const text = script.textContent;
+        try { result.push(JSON.parse(text)); }
+        catch (_) { try { result.push(JSON.parse(decodeURIComponent(text))); } catch (_) {} }
     }
+    return result;
+}"""
 
 
-def download_file(url: str, output_path: str, headers: dict) -> str:
-    with requests.get(url, headers=headers, stream=True, timeout=30) as response:
-        response.raise_for_status()
-        with open(output_path, "wb") as output:
-            for chunk in response.iter_content(chunk_size=1024 * 256):
-                if chunk:
-                    output.write(chunk)
+def fetch_douyin_video_meta(url: str) -> dict:
+    timeout = max(10, int(os.getenv("DOUYIN_BROWSER_TIMEOUT_SECONDS", "60")))
+    if not _BROWSER_LOCK.acquire(timeout=timeout):
+        raise DouyinDownloadError("抖音解析繁忙，请稍后重试")
+    started = time.monotonic()
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(channel="chromium", headless=True, timeout=timeout * 1000)
+            try:
+                context = browser.new_context(
+                    user_agent=DEFAULT_USER_AGENT, locale="zh-CN",
+                    timezone_id="Asia/Shanghai", viewport={"width": 1440, "height": 900},
+                )
+                page = context.new_page()
+                payloads = []
+
+                def on_response(response):
+                    host = (urlparse(response.url).hostname or "").lower()
+                    if not (host == "douyin.com" or host.endswith(".douyin.com") or host == "iesdouyin.com" or host.endswith(".iesdouyin.com")):
+                        return
+                    if response.status != 200 or "json" not in response.headers.get("content-type", "").lower():
+                        return
+                    try:
+                        payloads.append(response.json())
+                        if len(payloads) > 64:
+                            payloads.pop(0)
+                    except (BrowserError, ValueError):
+                        pass
+
+                page.on("response", on_response)
+                deadline = time.monotonic() + timeout
+                try:
+                    page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
+                except BrowserTimeout:
+                    logger.warning("抖音导航超时，检查已收到的数据")
+                aweme_id = extract_aweme_id(url) or extract_aweme_id(page.url)
+                while True:
+                    aweme_id = aweme_id or extract_aweme_id(page.url)
+                    item = None
+                    if aweme_id:
+                        for payload in payloads:
+                            item = _find_video(payload, aweme_id)
+                            if item:
+                                break
+                        if not item:
+                            try:
+                                item = _find_video(page.evaluate(_PAGE_DATA), aweme_id)
+                            except BrowserError:
+                                pass
+                    if item:
+                        video_urls = _video_urls(item)
+                        logger.info("抖音匿名解析成功 aweme_id=%s candidate_count=%s elapsed_seconds=%.2f", aweme_id, len(video_urls), time.monotonic() - started)
+                        return {
+                            "aweme_id": aweme_id, "resolved_url": page.url,
+                            "video_url": video_urls[0], "video_urls": video_urls,
+                            "title": item.get("desc") or "",
+                            "headers": {"User-Agent": DEFAULT_USER_AGENT, "Referer": page.url},
+                            "cookies": context.cookies(video_urls),
+                        }
+                    if time.monotonic() >= deadline:
+                        break
+                    page.wait_for_timeout(500)
+                try:
+                    body = page.locator("body").inner_text(timeout=2000)
+                except BrowserError:
+                    body = ""
+                if any(word in body for word in ("验证码", "完成验证", "安全验证", "拖动滑块")):
+                    raise DouyinDownloadError("抖音要求验证码，当前服务器匿名会话无法解析；请稍后重试并检查 VPS 出口网络")
+                raise DouyinDownloadError("抖音解析超时或作品不可公开访问，未取得目标视频地址")
+            finally:
+                browser.close()
+    except DouyinDownloadError:
+        raise
+    except BrowserError as exc:
+        logger.exception("抖音浏览器运行失败")
+        raise DouyinDownloadError("抖音浏览器运行失败，请检查 Chromium 安装、容器依赖和服务器网络") from exc
+    finally:
+        _BROWSER_LOCK.release()
+
+
+def download_file(url: str, output_path: str, headers: dict, cookies: list | None = None) -> str:
+    # Cookie 保留域名和路径限制，不发送给无关 CDN。
+    with requests.Session() as session:
+        for cookie in cookies or []:
+            session.cookies.set(cookie["name"], cookie["value"], domain=cookie["domain"], path=cookie["path"], secure=cookie.get("secure", False))
+        with session.get(url, headers=headers, stream=True, timeout=(15, 60)) as response:
+            response.raise_for_status()
+            total = 0
+            header = bytearray()
+            with open(output_path, "wb") as output:
+                for chunk in response.iter_content(chunk_size=1024 * 256):
+                    if chunk:
+                        if len(header) < 16:
+                            header.extend(chunk[:16 - len(header)])
+                        total += len(chunk)
+                        output.write(chunk)
+            if total < 8 or header[4:8] != b"ftyp":
+                raise DouyinDownloadError("抖音下载返回的不是有效 MP4 视频")
+            expected = response.headers.get("Content-Length")
+            if expected and not response.headers.get("Content-Encoding") and total != int(expected):
+                raise DouyinDownloadError("抖音视频下载不完整")
     return output_path
+
+
+def download_douyin_video(url: str, output_path: str) -> str:
+    meta = fetch_douyin_video_meta(url)
+    for index, candidate in enumerate(meta["video_urls"]):
+        try:
+            return download_file(candidate, output_path, meta["headers"], meta["cookies"])
+        except (requests.RequestException, DouyinDownloadError) as exc:
+            logger.warning("抖音媒体候选下载失败 aweme_id=%s candidate_index=%s error_type=%s", meta["aweme_id"], index, type(exc).__name__)
+    raise DouyinDownloadError("抖音视频地址已解析，但所有候选地址下载失败，请检查服务器网络或稍后重试")
